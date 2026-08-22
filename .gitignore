@@ -1,0 +1,7 @@
+.env
+*.log
+__pycache__/
+*.pyc
+post_log.json
+.autopost.lock
+output/
