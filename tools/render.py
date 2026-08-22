@@ -21,9 +21,13 @@ WHITE_BG = ((255, 255, 255), (17, 17, 17))
 BLACK_BG = ((17, 17, 17), (255, 255, 255))
 
 
-def theme_for_hour(hour):
-    """Слоты чередуются: 00 белый, 06 чёрный, 12 белый, 18 чёрный."""
-    return WHITE_BG if (hour // 6) % 2 == 0 else BLACK_BG
+def theme_by_index(index):
+    """Строгое чередование по номеру публикации: чётный белый, нечётный чёрный.
+
+    Привязка к часу не годится: при слотах 6 и 18 формула (час // 6) % 2
+    даёт 1 и 3 — оба нечётные, и все посты выходили бы чёрными.
+    """
+    return WHITE_BG if index % 2 == 0 else BLACK_BG
 
 
 def wrap(text, font, draw, max_width):
@@ -54,12 +58,12 @@ def fit_text(draw, text, max_width, max_height):
     return font, wrap(text, font, draw, max_width), 44
 
 
-def render(text, hour, out_path):
+def render(text, index, out_path):
     """Рисует картинку и сохраняет в JPEG."""
     if not os.path.exists(FONT_PATH):
         sys.exit("Не найден шрифт: %s" % FONT_PATH)
 
-    bg, fg = theme_for_hour(hour)
+    bg, fg = theme_by_index(index)
     image = Image.new("RGB", (SIZE, SIZE), bg)
     draw = ImageDraw.Draw(image)
 
@@ -86,11 +90,11 @@ def main():
         return 1
 
     text = sys.argv[1]
-    hour = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    index = int(sys.argv[2]) if len(sys.argv) > 2 else 0
     out = sys.argv[3] if len(sys.argv) > 3 else os.path.join(config.ROOT, "output", "preview.jpg")
 
-    path = render(text, hour, out)
-    bg = "белый" if theme_for_hour(hour) is WHITE_BG else "чёрный"
+    path = render(text, index, out)
+    bg = "белый" if theme_by_index(index) is WHITE_BG else "чёрный"
     print("Готово: %s (%s фон)" % (path, bg))
     return 0
 

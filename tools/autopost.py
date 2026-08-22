@@ -105,6 +105,15 @@ def already_posted(journal, day, slot):
     return key in journal.get("posts", {})
 
 
+def next_index(journal):
+    """Сквозной номер публикации — по нему чередуется фон.
+
+    Считается по журналу, а не по часу: при любом наборе слотов
+    чередование остаётся строгим, а после сбоя не сбивается.
+    """
+    return journal.get("counter", 0)
+
+
 def next_quote(data):
     for q in data["quotes"]:
         if not q.get("used"):
@@ -182,12 +191,14 @@ def main():
             log("Все цитаты использованы, база требует пополнения")
             return 1
 
-        theme = "белый" if (slot // 6) % 2 == 0 else "чёрный"
-        log("Слот %02d:00, фон %s, цитата #%d: %s" % (slot, theme, quote["id"], quote["text"]))
+        index = next_index(journal)
+        theme = "белый" if index % 2 == 0 else "чёрный"
+        log("Слот %02d:00, пост #%d, фон %s, цитата #%d: %s"
+            % (slot, index + 1, theme, quote["id"], quote["text"]))
 
         name = "%s_%02d.jpg" % (now.date().isoformat(), slot)
         image_path = os.path.join(config.OUTPUT, name)
-        render.render(quote["text"], slot, image_path)
+        render.render(quote["text"], index, image_path)
         log("Картинка отрисована: %s" % name)
 
         if dry:
@@ -212,9 +223,18 @@ def main():
         journal.setdefault("posts", {})["%s_%02d" % (now.date().isoformat(), slot)] = {
             "quote_id": quote["id"],
             "media_id": media_id,
+            "index": index,
+            "theme": theme,
             "at": now.isoformat(timespec="seconds"),
         }
+        journal["counter"] = index + 1
         save_json(LOG_PATH, journal)
+
+        # картинка уже лежит в хранилище, локальная копия больше не нужна
+        try:
+            os.remove(image_path)
+        except OSError as e:
+            log("Не удалось убрать локальный файл: %s" % e)
 
         left = sum(1 for q in quotes["quotes"] if not q.get("used"))
         log("Опубликовано, media_id %s. Осталось цитат: %d" % (media_id, left))
