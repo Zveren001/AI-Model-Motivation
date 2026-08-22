@@ -36,9 +36,19 @@ NET_DELAY = 20
 
 CAPTION_TAGS = "#мотивация #цитаты #мысли #саморазвитие"
 
+# Расписание задано по Москве, а сервер живёт по UTC. Брать datetime.now()
+# нельзя: в 06:00 МСК скрипт увидел бы 03:00 и решил, что слот не наступил.
+# Смещение задаётся числом, а не именем зоны: базы tzdata может не оказаться,
+# а Москва с 2014 года стоит на UTC+3 без перехода на летнее время.
+TZ = datetime.timezone(datetime.timedelta(hours=int(os.environ.get("UTC_OFFSET", "3"))))
+
+
+def now_local():
+    return datetime.datetime.now(TZ)
+
 
 def log(message):
-    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    stamp = now_local().strftime("%Y-%m-%d %H:%M:%S")
     line = "%s  %s" % (stamp, message)
     print(line)
     try:
@@ -170,7 +180,7 @@ def main():
         return 0
 
     try:
-        now = datetime.datetime.now()
+        now = now_local()
         slot = force_slot if force_slot is not None else current_slot(now)
         if slot is None:
             log("Сейчас %02d:%02d, ни один слот ещё не наступил" % (now.hour, now.minute))
