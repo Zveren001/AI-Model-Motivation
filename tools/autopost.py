@@ -23,6 +23,7 @@ import config
 import github_upload
 import meta_net
 import render
+import threads_publish
 
 API = "https://graph.instagram.com/v21.0"
 
@@ -35,6 +36,9 @@ NET_ATTEMPTS = 8
 NET_DELAY = 20
 
 CAPTION_TAGS = "#мотивация #цитаты #мысли #саморазвитие"
+
+# Threads принимает ровно одну тему на пост, хэштеги внутри текста там не работают
+THREADS_TOPIC = "мотивация"
 
 # Расписание задано по Москве, а сервер живёт по UTC. Брать datetime.now()
 # нельзя: в 06:00 МСК скрипт увидел бы 03:00 и решил, что слот не наступил.
@@ -131,17 +135,13 @@ def next_quote(data):
     return None
 
 
-def publish(image_path, caption):
-    """Заливает картинку и публикует. Возвращает media_id."""
+def publish(image_url, caption):
+    """Публикует картинку в Instagram по готовой ссылке. Возвращает media_id."""
     user_id = config.get("IG_USER_ID", required=True)
     token = config.get("IG_ACCESS_TOKEN", required=True)
 
-    key = "motivation/%s" % os.path.basename(image_path)
-    url = github_upload.upload(image_path, key)
-    log("Загружено: %s" % url)
-
     container = meta_net.post("%s/%s/media" % (API, user_id), {
-        "image_url": url,
+        "image_url": image_url,
         "caption": caption,
         "access_token": token,
     })
@@ -219,12 +219,25 @@ def main():
             log("Сеть недоступна, публикация отложена")
             return 1
 
+        key = "motivation/%s" % os.path.basename(image_path)
+        image_url = github_upload.upload(image_path, key)
+        log("Загружено: %s" % image_url)
+
         try:
-            media_id = publish(image_path, "%s\n\n%s" % (quote["text"], CAPTION_TAGS))
+            media_id = publish(image_url, "%s\n\n%s" % (quote["text"], CAPTION_TAGS))
         except (urllib.error.HTTPError, RuntimeError, KeyError) as e:
             body = e.read().decode()[:400] if hasattr(e, "read") else str(e)
             log("ОШИБКА публикации: %s" % body)
             return 1
+
+        thread_id = None
+        if config.get("THREADS_ACCESS_TOKEN"):
+            try:
+                thread_id = threads_publish.publish(quote["text"], image_url, THREADS_TOPIC)
+                log("Threads: опубликовано, id %s" % thread_id)
+            except (urllib.error.HTTPError, RuntimeError, KeyError) as e:
+                body = e.read().decode()[:400] if hasattr(e, "read") else str(e)
+                log("Threads не принял пост: %s" % body)
 
         quote["used"] = True
         quote["used_at"] = now.isoformat(timespec="seconds")
@@ -233,6 +246,7 @@ def main():
         journal.setdefault("posts", {})["%s_%02d" % (now.date().isoformat(), slot)] = {
             "quote_id": quote["id"],
             "media_id": media_id,
+            "thread_id": thread_id,
             "index": index,
             "theme": theme,
             "at": now.isoformat(timespec="seconds"),
