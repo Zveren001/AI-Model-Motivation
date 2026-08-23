@@ -1,0 +1,2 @@
+# Конфиги для Linux-сервера всегда с LF: cron не принимает файлы с CRLF
+*.cron text eol=lf
