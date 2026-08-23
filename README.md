@@ -38,6 +38,7 @@ AI Model Motivational posts/
 ├── tools/
 │   ├── autopost.py         публикация по расписанию
 │   ├── threads_publish.py  дубль публикации в Threads
+│   ├── backfill_threads.py дозаливка в Threads того, что вышло только в Instagram
 │   ├── threads_refresh_token.py  продление токена Threads
 │   ├── render.py           отрисовка картинки
 │   ├── add_quotes.py       пополнение базы, проверка текстов, статистика
