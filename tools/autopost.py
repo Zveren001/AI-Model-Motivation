@@ -107,6 +107,17 @@ def wait_for_network():
     return False
 
 
+def drop_local(path):
+    """Картинка уже в хранилище — локальная копия не нужна ни после успеха, ни после сбоя.
+
+    Без этого затяжной сбой публикации копил бы в output по картинке на каждый запуск.
+    """
+    try:
+        os.remove(path)
+    except OSError as e:
+        log("Не удалось убрать локальный файл: %s" % e)
+
+
 def current_slot(now):
     """Ближайший слот из SLOTS, в который попадает текущий час."""
     slots = [int(s) for s in config.get("SLOTS", "6,18").split(",") if s.strip()]
@@ -228,6 +239,7 @@ def main():
         except (urllib.error.HTTPError, RuntimeError, KeyError) as e:
             body = e.read().decode()[:400] if hasattr(e, "read") else str(e)
             log("ОШИБКА публикации: %s" % body)
+            drop_local(image_path)
             return 1
 
         thread_id = None
@@ -254,11 +266,7 @@ def main():
         journal["counter"] = index + 1
         save_json(LOG_PATH, journal)
 
-        # картинка уже лежит в хранилище, локальная копия больше не нужна
-        try:
-            os.remove(image_path)
-        except OSError as e:
-            log("Не удалось убрать локальный файл: %s" % e)
+        drop_local(image_path)
 
         left = sum(1 for q in quotes["quotes"] if not q.get("used"))
         log("Опубликовано, media_id %s. Осталось цитат: %d" % (media_id, left))
