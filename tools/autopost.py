@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 """Автопубликация цитаты по расписанию.
 
-Один запуск = один пост. Порядок: взять неиспользованную цитату,
-отрисовать картинку, залить в хранилище, опубликовать, пометить цитату.
+Один запуск = один пост. Порядок: взять неиспользованную цитату, собрать
+материал, залить в хранилище, опубликовать, пометить цитату.
+
+Лента чередуется через один: за картинкой ролик, за роликом картинка. Час
+публикации задаёт cron, минуты внутри часа добирает случайная пауза, поэтому
+ключ --now нужен ручному запуску, чтобы не ждать её. Ключ --kind задаёт тип
+принудительно, чередование дальше выправляется само.
 
 Защита от повторов трёхуровневая, потому что cron может сработать
 дважды при перезапуске сервера или сдвиге времени:
@@ -14,6 +19,7 @@
 import datetime
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -22,6 +28,7 @@ import urllib.error
 import config
 import github_upload
 import meta_net
+import reel
 import render
 import threads_publish
 
@@ -31,9 +38,14 @@ LOG_PATH = os.path.join(config.ROOT, "post_log.json")
 LOCK_PATH = os.path.join(config.ROOT, ".autopost.lock")
 RUN_LOG = os.path.join(config.ROOT, "autopost.log")
 
-LOCK_TTL = 900
+# Блокировка переживает разброс времени вместе с рендером ролика: полчаса сна
+# плюс сборка видео легко перекрывают прежние пятнадцать минут.
+LOCK_TTL = 3600
 NET_ATTEMPTS = 8
 NET_DELAY = 20
+
+JITTER_MIN = 15 * 60
+JITTER_MAX = 30 * 60
 
 CAPTION_TAGS = "#мотивация #цитаты #мысли #саморазвитие"
 
@@ -108,9 +120,9 @@ def wait_for_network():
 
 
 def drop_local(path):
-    """Картинка уже в хранилище — локальная копия не нужна ни после успеха, ни после сбоя.
+    """Файл уже в хранилище — локальная копия не нужна ни после успеха, ни после сбоя.
 
-    Без этого затяжной сбой публикации копил бы в output по картинке на каждый запуск.
+    Без этого затяжной сбой публикации копил бы в output по файлу на каждый запуск.
     """
     try:
         os.remove(path)
@@ -131,12 +143,19 @@ def already_posted(journal, day, slot):
 
 
 def next_index(journal):
-    """Сквозной номер публикации — по нему чередуется фон.
+    """Сквозной номер публикации.
 
     Считается по журналу, а не по часу: при любом наборе слотов
-    чередование остаётся строгим, а после сбоя не сбивается.
+    нумерация остаётся строгой и после сбоя не сбивается.
     """
     return journal.get("counter", 0)
+
+
+def last_post(journal):
+    posts = journal.get("posts", {})
+    if not posts:
+        return None
+    return max(posts.values(), key=lambda p: p.get("at", ""))
 
 
 def next_quote(data):
@@ -146,27 +165,27 @@ def next_quote(data):
     return None
 
 
-def publish(image_url, caption):
-    """Публикует картинку в Instagram по готовой ссылке. Возвращает media_id."""
+def publish(fields, caption, attempts=20):
+    """Публикует материал в Instagram по готовой ссылке. Возвращает media_id."""
     user_id = config.get("IG_USER_ID", required=True)
     token = config.get("IG_ACCESS_TOKEN", required=True)
 
-    container = meta_net.post("%s/%s/media" % (API, user_id), {
-        "image_url": image_url,
-        "caption": caption,
-        "access_token": token,
-    })
+    payload = dict(fields)
+    payload["caption"] = caption
+    payload["access_token"] = token
+
+    container = meta_net.post("%s/%s/media" % (API, user_id), payload)
     creation_id = container["id"]
 
-    for attempt in range(20):
-        time.sleep(4)
+    for attempt in range(attempts):
+        time.sleep(5)
         status = meta_net.get("%s/%s" % (API, creation_id),
                               {"fields": "status_code", "access_token": token})
         code = status.get("status_code")
         if code == "FINISHED":
             break
         if code == "ERROR":
-            raise RuntimeError("Instagram не смог обработать картинку")
+            raise RuntimeError("Instagram не смог обработать материал")
     else:
         raise RuntimeError("Контейнер не обработался за отведённое время")
 
@@ -177,12 +196,63 @@ def publish(image_url, caption):
     return result.get("id")
 
 
+def publish_image(url, caption):
+    return publish({"image_url": url}, caption)
+
+
+def publish_reel(url, caption):
+    """Ролик обрабатывается дольше картинки, поэтому ждём вчетверо терпеливее."""
+    return publish({"media_type": "REELS", "video_url": url,
+                    "share_to_feed": "true"}, caption, attempts=48)
+
+
+def next_kind(journal, index):
+    """Чередование ленты: тип всегда противоположен последнему опубликованному.
+
+    Отталкиваться от чётности счётчика нельзя: ручной запуск с принудительным
+    типом сдвигает счётчик, чётность перестаёт совпадать с фактической лентой,
+    и следующий пост выходит того же типа, что предыдущий.
+    """
+    last = last_post(journal)
+    if last:
+        return "image" if last.get("kind", "image") == "reel" else "reel"
+    return "image" if index % 2 == 0 else "reel"
+
+
+def number_of_kind(journal, kind):
+    """Порядковый номер внутри своего типа — по нему идут тема и эффект.
+
+    Считается по журналу, а не делением сквозного счётчика: ручной запуск
+    с принудительным типом сбил бы деление, и материал повторил бы тему
+    и эффект дважды подряд. Записи без пометки типа — картинки, они старше
+    самой пометки.
+    """
+    return sum(1 for p in journal.get("posts", {}).values()
+               if p.get("kind", "image") == kind)
+
+
+def sleep_jitter():
+    """Разброс перед публикацией, чтобы посты не выходили секунда в секунду.
+
+    Час задаёт cron, минуты внутри часа — эта пауза: ровное расписание
+    читается как автопостинг и самой площадкой, и живым читателем.
+    """
+    delay = random.randint(JITTER_MIN, JITTER_MAX)
+    log("Разброс: пауза %d мин %d сек" % (delay // 60, delay % 60))
+    time.sleep(delay)
+
+
 def main():
     dry = "--dry-run" in sys.argv
     force_slot = None
+    force_kind = None
     for a in sys.argv:
         if a.startswith("--slot="):
             force_slot = int(a.split("=", 1)[1])
+        elif a.startswith("--kind="):
+            force_kind = a.split("=", 1)[1]
+            if force_kind not in ("image", "reel"):
+                sys.exit("Ключ --kind принимает image или reel")
 
     log("=" * 55)
     log("Запуск" + (" (проверка, без отправки)" if dry else ""))
@@ -213,39 +283,55 @@ def main():
             return 1
 
         index = next_index(journal)
-        theme = "белый" if index % 2 == 0 else "чёрный"
-        log("Слот %02d:00, пост #%d, фон %s, цитата #%d: %s"
-            % (slot, index + 1, theme, quote["id"], quote["text"]))
+        kind = force_kind or next_kind(journal, index)
+        number = number_of_kind(journal, kind)
+        theme = "белый" if number % 2 == 0 else "чёрный"
+        log("Слот %02d:00, пост #%d, %s, фон %s, цитата #%d: %s"
+            % (slot, index + 1, "ролик" if kind == "reel" else "картинка",
+               theme, quote["id"], quote["text"]))
 
-        name = "%s_%02d.jpg" % (now.date().isoformat(), slot)
-        image_path = os.path.join(config.OUTPUT, name)
-        render.render(quote["text"], index, image_path)
-        log("Картинка отрисована: %s" % name)
+        if kind == "reel":
+            name = "%s_%02d.mp4" % (now.date().isoformat(), slot)
+            media_path = os.path.join(config.OUTPUT, name)
+            _, effect, _ = reel.render(quote["text"], number, media_path)
+            log("Ролик собран: %s, эффект %s" % (name, effect))
+        else:
+            name = "%s_%02d.jpg" % (now.date().isoformat(), slot)
+            media_path = os.path.join(config.OUTPUT, name)
+            render.render(quote["text"], number, media_path)
+            log("Картинка отрисована: %s" % name)
 
         if dry:
             log("Проверка завершена, ничего не отправлено")
             return 0
 
+        if "--now" not in sys.argv:
+            sleep_jitter()
+
         if not wait_for_network():
             log("Сеть недоступна, публикация отложена")
             return 1
 
-        key = "motivation/%s" % os.path.basename(image_path)
-        image_url = github_upload.upload(image_path, key)
-        log("Загружено: %s" % image_url)
+        key = "motivation/%s" % os.path.basename(media_path)
+        media_url = github_upload.upload(media_path, key)
+        log("Загружено: %s" % media_url)
 
+        caption = "%s\n\n%s" % (quote["text"], CAPTION_TAGS)
         try:
-            media_id = publish(image_url, "%s\n\n%s" % (quote["text"], CAPTION_TAGS))
+            if kind == "reel":
+                media_id = publish_reel(media_url, caption)
+            else:
+                media_id = publish_image(media_url, caption)
         except (urllib.error.HTTPError, RuntimeError, KeyError) as e:
             body = e.read().decode()[:400] if hasattr(e, "read") else str(e)
             log("ОШИБКА публикации: %s" % body)
-            drop_local(image_path)
+            drop_local(media_path)
             return 1
 
         thread_id = None
-        if config.get("THREADS_ACCESS_TOKEN"):
+        if kind == "image" and config.get("THREADS_ACCESS_TOKEN"):
             try:
-                thread_id = threads_publish.publish(quote["text"], image_url, THREADS_TOPIC)
+                thread_id = threads_publish.publish(quote["text"], media_url, THREADS_TOPIC)
                 log("Threads: опубликовано, id %s" % thread_id)
             except (urllib.error.HTTPError, RuntimeError, KeyError) as e:
                 body = e.read().decode()[:400] if hasattr(e, "read") else str(e)
@@ -260,13 +346,14 @@ def main():
             "media_id": media_id,
             "thread_id": thread_id,
             "index": index,
+            "kind": kind,
             "theme": theme,
             "at": now.isoformat(timespec="seconds"),
         }
         journal["counter"] = index + 1
         save_json(LOG_PATH, journal)
 
-        drop_local(image_path)
+        drop_local(media_path)
 
         left = sum(1 for q in quotes["quotes"] if not q.get("used"))
         log("Опубликовано, media_id %s. Осталось цитат: %d" % (media_id, left))
