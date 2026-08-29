@@ -25,9 +25,14 @@
 # Сборка ролика занимает около девяти секунд на одном ядре и укладывается сюда же.
 #
 # Ставится так:
-#   cp /opt/motivation/deploy/motivation.cron /etc/cron.d/motivation
+#   sed 's/\r$//' /opt/motivation/deploy/motivation.cron > /etc/cron.d/motivation
 #   chmod 644 /etc/cron.d/motivation
 #   systemctl restart cron
+#
+# sed в первой строке обязателен: файл правится на Windows, оттуда приезжает
+# с CRLF, и cron отвергает его целиком со строкой «bad minute» в syslog —
+# молча перестают работать все задачи, а не одна. Проверять после установки:
+#   grep -c 'Error.*motivation' /var/log/syslog
 
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

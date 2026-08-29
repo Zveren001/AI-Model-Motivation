@@ -1,2 +1,4 @@
-# Конфиги для Linux-сервера всегда с LF: cron не принимает файлы с CRLF
+# Файлы для Linux всегда с LF: cron отвергает crontab с CRLF целиком,
+# а редакторы и скрипты на Windows ставят CRLF молча.
 *.cron text eol=lf
+*.sh   text eol=lf
