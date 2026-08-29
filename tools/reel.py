@@ -341,7 +341,7 @@ def effect_by_number(number):
 
 
 def theme_by_number(number):
-    """Тема ролика чередуется по его собственному номеру, а не по сквозному."""
+    """Запасная тема, когда вызывающий её не задал: чередование по номеру ролика."""
     return "white" if number % 2 == 0 else "black"
 
 
@@ -360,13 +360,17 @@ def audio_args(theme, with_typing):
     return ["-i", music, "-filter_complex", "[1:a]afade=t=out:st=6.4:d=0.6[a]"]
 
 
-def render(text, number, out_path):
-    """Собирает ролик с цитатой: эффект и тема выбираются по номеру рилса."""
+def render(text, number, out_path, theme=None):
+    """Собирает ролик с цитатой.
+
+    Эффект всегда идёт по номеру ролика, а тему задаёт вызывающий: в ленте
+    цвет чередуется по своему циклу и с номером ролика не совпадает.
+    """
     if not os.path.exists(FONT_PATH):
         sys.exit("Не найден шрифт: %s" % FONT_PATH)
 
     name, effect, with_typing = effect_by_number(number)
-    theme = theme_by_number(number)
+    theme = theme or theme_by_number(number)
     canvas = Canvas(text, theme)
 
     work = tempfile.mkdtemp(prefix="reel_")
@@ -397,15 +401,16 @@ def render(text, number, out_path):
 
 def main():
     if len(sys.argv) < 2:
-        print("Использование: python reel.py \"текст цитаты\" [номер] [файл]")
-        print("Номер задаёт эффект и тему, счёт с нуля")
+        print("Использование: python reel.py \"текст цитаты\" [номер] [файл] [--black|--white]")
+        print("Номер задаёт эффект, счёт с нуля; тему можно задать ключом")
         return 1
 
     text = sys.argv[1]
     number = int(sys.argv[2]) if len(sys.argv) > 2 else 0
     out = sys.argv[3] if len(sys.argv) > 3 else os.path.join(config.OUTPUT, "preview.mp4")
+    theme = "black" if "--black" in sys.argv else ("white" if "--white" in sys.argv else None)
 
-    path, name, theme = render(text, number, out)
+    path, name, theme = render(text, number, out, theme=theme)
     print("Готово: %s (эффект %s, фон %s)"
           % (path, name, "белый" if theme == "white" else "чёрный"))
     return 0

@@ -4,7 +4,8 @@
 Один запуск = один пост. Порядок: взять неиспользованную цитату, собрать
 материал, залить в хранилище, опубликовать, пометить цитату.
 
-Лента чередуется через один: за картинкой ролик, за роликом картинка. Час
+Лента идёт циклом из четырёх: ролик белый, ролик чёрный, картинка белая,
+картинка чёрная. Цвет меняется каждую публикацию, формат — через два. Час
 публикации задаёт cron, минуты внутри часа добирает случайная пауза, поэтому
 ключ --now нужен ручному запуску, чтобы не ждать её. Ключ --kind задаёт тип
 принудительно, чередование дальше выправляется само.
@@ -206,26 +207,32 @@ def publish_reel(url, caption):
                     "share_to_feed": "true"}, caption, attempts=48)
 
 
-def next_kind(journal, index):
-    """Чередование ленты: тип всегда противоположен последнему опубликованному.
+# Цикл ленты: цвет меняется каждую публикацию, формат идёт парами.
+# Чередовать через один и цвет, и формат одновременно нельзя — периоды
+# совпадут, и цвет намертво прилипнет к формату: все ролики станут чёрными,
+# все картинки белыми. Приоритет отдан цвету, поэтому форматы идут по два.
+CYCLE = [("reel", "white"), ("reel", "black"), ("image", "white"), ("image", "black")]
 
-    Отталкиваться от чётности счётчика нельзя: ручной запуск с принудительным
-    типом сдвигает счётчик, чётность перестаёт совпадать с фактической лентой,
-    и следующий пост выходит того же типа, что предыдущий.
+
+def next_cycle_pos(journal):
+    """Позиция следующей публикации в цикле.
+
+    Считается от последней записи журнала, а не от сквозного счётчика:
+    ручная публикация и удаление поста из ленты сдвигают счёт, а позиция
+    в цикле должна следовать за тем, что зритель видит в ленте на самом деле.
     """
     last = last_post(journal)
-    if last:
-        return "image" if last.get("kind", "image") == "reel" else "reel"
-    return "image" if index % 2 == 0 else "reel"
+    if last is None or "cycle" not in last:
+        return 0
+    return (last["cycle"] + 1) % len(CYCLE)
 
 
 def number_of_kind(journal, kind):
-    """Порядковый номер внутри своего типа — по нему идут тема и эффект.
+    """Порядковый номер внутри своего типа — по нему идёт эффект ролика.
 
     Считается по журналу, а не делением сквозного счётчика: ручной запуск
-    с принудительным типом сбил бы деление, и материал повторил бы тему
-    и эффект дважды подряд. Записи без пометки типа — картинки, они старше
-    самой пометки.
+    с принудительным типом сбил бы деление, и ролик повторил бы эффект
+    дважды подряд. Записи без пометки типа — картинки, они старше пометки.
     """
     return sum(1 for p in journal.get("posts", {}).values()
                if p.get("kind", "image") == kind)
@@ -283,9 +290,11 @@ def main():
             return 1
 
         index = next_index(journal)
-        kind = force_kind or next_kind(journal, index)
+        pos = next_cycle_pos(journal)
+        cycle_kind, cycle_theme = CYCLE[pos]
+        kind = force_kind or cycle_kind
         number = number_of_kind(journal, kind)
-        theme = "белый" if number % 2 == 0 else "чёрный"
+        theme = "белый" if cycle_theme == "white" else "чёрный"
         log("Слот %02d:00, пост #%d, %s, фон %s, цитата #%d: %s"
             % (slot, index + 1, "ролик" if kind == "reel" else "картинка",
                theme, quote["id"], quote["text"]))
@@ -293,12 +302,13 @@ def main():
         if kind == "reel":
             name = "%s_%02d.mp4" % (now.date().isoformat(), slot)
             media_path = os.path.join(config.OUTPUT, name)
-            _, effect, _ = reel.render(quote["text"], number, media_path)
+            _, effect, _ = reel.render(quote["text"], number, media_path,
+                                       theme=cycle_theme)
             log("Ролик собран: %s, эффект %s" % (name, effect))
         else:
             name = "%s_%02d.jpg" % (now.date().isoformat(), slot)
             media_path = os.path.join(config.OUTPUT, name)
-            render.render(quote["text"], number, media_path)
+            render.render(quote["text"], 0 if cycle_theme == "white" else 1, media_path)
             log("Картинка отрисована: %s" % name)
 
         if dry:
@@ -347,6 +357,7 @@ def main():
             "thread_id": thread_id,
             "index": index,
             "kind": kind,
+            "cycle": pos,
             "theme": theme,
             "at": now.isoformat(timespec="seconds"),
         }
