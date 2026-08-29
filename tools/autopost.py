@@ -32,6 +32,7 @@ import meta_net
 import reel
 import render
 import threads_publish
+import youtube_publish
 
 API = "https://graph.instagram.com/v21.0"
 
@@ -49,6 +50,11 @@ JITTER_MIN = 15 * 60
 JITTER_MAX = 30 * 60
 
 CAPTION_TAGS = "#мотивация #цитаты #мысли #саморазвитие"
+
+# Вертикальное видео короче трёх минут YouTube сам относит к Shorts,
+# хэштег в описании только помогает ему определиться быстрее
+YOUTUBE_TAGS = "#shorts #мотивация #цитаты #саморазвитие"
+YOUTUBE_KEYWORDS = ["мотивация", "цитаты", "саморазвитие", "shorts"]
 
 # Threads принимает ровно одну тему на пост, хэштеги внутри текста там не работают
 THREADS_TOPIC = "мотивация"
@@ -338,6 +344,18 @@ def main():
             drop_local(media_path)
             return 1
 
+        youtube_id = None
+        if kind == "reel" and youtube_publish.configured():
+            try:
+                youtube_id, privacy = youtube_publish.publish(
+                    media_path, quote["text"],
+                    quote["text"] + "\n\n" + YOUTUBE_TAGS,
+                    tags=YOUTUBE_KEYWORDS)
+                log("YouTube: опубликовано, id %s, доступ %s" % (youtube_id, privacy))
+            except (urllib.error.HTTPError, urllib.error.URLError, ValueError, KeyError) as e:
+                detail = e.read().decode()[:400] if hasattr(e, "read") else str(e)
+                log("YouTube не принял ролик: %s" % detail)
+
         thread_id = None
         if kind == "image" and config.get("THREADS_ACCESS_TOKEN"):
             try:
@@ -357,6 +375,7 @@ def main():
             "thread_id": thread_id,
             "index": index,
             "kind": kind,
+            "youtube_id": youtube_id,
             "cycle": pos,
             "theme": theme,
             "at": now.isoformat(timespec="seconds"),
