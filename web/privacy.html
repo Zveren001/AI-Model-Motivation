@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Политика конфиденциальности — Mono.motiv</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; padding: 48px 20px;
+    font: 16px/1.65 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #111; color: #eee;
+  }
+  main { max-width: 620px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -0.4px; }
+  .sub { color: #8a8a8a; margin: 0 0 34px; font-size: 14px; }
+  h2 { font-size: 18px; margin: 32px 0 10px; }
+  p { margin: 0 0 14px; color: #ccc; }
+  ul { color: #ccc; padding-left: 20px; }
+  li { margin-bottom: 6px; }
+  a { color: #7fb3ff; }
+  footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid #2a2a2a; color: #7a7a7a; font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Политика конфиденциальности</h1>
+  <p class="sub">Приложение Mono.motiv · обновлено 29 августа 2026</p>
+
+  <p>Mono.motiv — служебное приложение, которое публикует подготовленные автором ролики на его собственный YouTube-канал. Оно не рассчитано на сторонних пользователей и не предоставляет им никаких функций.</p>
+
+  <h2>Какие данные используются</h2>
+  <p>Приложение работает только с аккаунтом Google своего владельца и запрашивает единственное разрешение:</p>
+  <ul>
+    <li><b>YouTube Data API — загрузка видео</b> (<code>youtube.upload</code>): нужно, чтобы выкладывать готовые файлы на канал владельца.</li>
+  </ul>
+  <p>Никаких других данных аккаунта приложение не запрашивает: ни почту, ни контакты, ни историю просмотров, ни статистику.</p>
+
+  <h2>Что хранится</h2>
+  <p>На сервере владельца хранится токен доступа к его собственному аккаунту Google — он нужен, чтобы публикация шла по расписанию без ручного входа. Токен лежит в файле конфигурации, доступном только владельцу сервера, и не передаётся никому.</p>
+  <p>Персональные данные каких-либо третьих лиц не собираются, не хранятся и не обрабатываются.</p>
+
+  <h2>Передача третьим лицам</h2>
+  <p>Данные не продаются, не передаются и не раскрываются. Единственный внешний адресат запросов — сами сервисы Google, куда загружается видео.</p>
+  <p>Использование данных, полученных через Google API, подчиняется <a href="https://developers.google.com/terms/api-services-user-data-policy">Политике Google API Services User Data</a>, включая требования Limited Use.</p>
+
+  <h2>Отзыв доступа</h2>
+  <p>Владелец может в любой момент отозвать доступ приложения на странице <a href="https://myaccount.google.com/permissions">Разрешения аккаунта Google</a>. После отзыва публикация прекращается, а сохранённый токен становится недействительным.</p>
+
+  <h2>Изменения</h2>
+  <p>Если политика изменится, обновлённая версия появится на этой же странице с новой датой.</p>
+
+  <footer>
+    Вопросы: <a href="mailto:mono.motivation69@gmail.com">mono.motivation69@gmail.com</a><br>
+    <a href="index.html">На главную</a>
+  </footer>
+</main>
+</body>
+</html>
