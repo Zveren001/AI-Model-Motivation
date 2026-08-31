@@ -11,7 +11,9 @@
 
 import json
 import os
+import random
 import sys
+import time
 import urllib.request
 
 import config
@@ -22,6 +24,12 @@ RAW = "https://raw.githubusercontent.com/%s/%s/%s/motivation/%s"
 
 TAGS = "#shorts #мотивация #цитаты #саморазвитие"
 KEYWORDS = ["мотивация", "цитаты", "саморазвитие", "shorts"]
+
+# Пауза между загрузками. Пачка видео подряд с аккаунта, который обычно
+# публикует два ролика в сутки, читается антифродом как бот: 30.08.2026
+# аккаунт заблокировали в том числе после четырёх загрузок за час.
+PAUSE_MIN = 120
+PAUSE_MAX = 300
 
 
 def quote_text(quote_id):
@@ -55,8 +63,11 @@ def main():
 
     dry = "--dry-run" in sys.argv
     print("Роликов без YouTube: %d" % len(todo))
+    if len(todo) > 4 and not dry:
+        print("Их много — заливаю с паузами, это займёт около %d минут"
+              % (len(todo) * (PAUSE_MIN + PAUSE_MAX) // 120))
 
-    for key, post in todo:
+    for number, (key, post) in enumerate(todo):
         text = quote_text(post["quote_id"])
         if not text:
             print("  %s: цитата #%s не найдена" % (key, post.get("quote_id")))
@@ -64,6 +75,11 @@ def main():
         if dry:
             print("  %s: %s" % (key, text))
             continue
+
+        if number and not dry:
+            pause = random.randint(PAUSE_MIN, PAUSE_MAX)
+            print("     пауза %d сек" % pause)
+            time.sleep(pause)
 
         name = "%s.mp4" % key
         local = os.path.join(config.OUTPUT, name)
