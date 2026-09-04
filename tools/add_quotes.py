@@ -278,8 +278,8 @@ def stats():
 
     print("всего цитат: %d" % len(quotes))
     print("использовано: %d, осталось: %d" % (used, len(quotes) - used))
-    print("с рассуждением осталось: %d — хватит на %d дней при одном развёрнутом ролике в сутки"
-          % (long_left, long_left))
+    print("с развёрткой осталось: %d — хватит на %d дней при двух роликах в сутки"
+          % (long_left, long_left // 2))
     print("тем: %d" % len(topics))
     print("хватит на %d дней при 2 постах, на %d при 4"
           % ((len(quotes) - used) // 2, (len(quotes) - used) // 4))
