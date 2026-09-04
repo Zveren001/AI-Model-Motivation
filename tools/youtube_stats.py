@@ -197,8 +197,18 @@ def collect():
     return stats
 
 
+def topics_by_quote():
+    """Тема по id цитаты: у записей журнала до 04.09.2026 темы нет."""
+    try:
+        with open(config.QUOTES, encoding="utf-8") as f:
+            return {q["id"]: q["topic"] for q in json.load(f)["quotes"]}
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
 def summary(stats):
     posts = journal_videos()
+    topics = topics_by_quote()
     print("Обновлено: %s, роликов: %d" % (stats.get("updated"), len(stats.get("videos", {}))))
     print("%-12s %7s %6s %6s %6s %6s  %-6s %-14s %s"
           % ("дата", "просм", "вовл%", "лайки", "комм", "оценка", "формат", "тема", "цитата"))
@@ -213,13 +223,15 @@ def summary(stats):
                  "%.0f" % (share * 100) if share is not None else "-",
                  video.get("likes", 0), video.get("comments", 0),
                  score if score is not None else "-",
-                 post.get("format") or "short", post.get("topic") or "",
+                 post.get("format") or "short",
+                 post.get("topic") or topics.get(video.get("quote_id"), ""),
                  video.get("quote_id")))
         if score is None:
             continue
         for field in groups:
-            if field in post:
-                groups[field].setdefault(post[field], []).append(score)
+            value = post.get(field) if field != "topic" else                 post.get("topic") or topics.get(video.get("quote_id"))
+            if value is not None:
+                groups[field].setdefault(value, []).append(score)
 
     for field, label in (("format", "Формат"), ("cta", "Призыв"), ("topic", "Тема")):
         if not groups[field]:

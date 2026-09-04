@@ -25,21 +25,19 @@
 Без этого шага запрос статистики вернёт `accessNotConfigured`, а скрипт
 напишет «API не включён в проекте Google Cloud».
 
-## 2. Добавить права на экране согласия
+## 2. Экран согласия не трогать
 
-**Google Auth Platform → Data Access** (в старом интерфейсе: OAuth consent
-screen → Scopes). **Add or remove scopes**, отметить:
+Права на экране **Data Access** прописывать не нужно: 04.09.2026 токен
+с тремя правами выпущен без этого, Google просто показывает окно
+«приложение не проверено». Баннеры «requires verification» можно игнорировать.
 
-- `https://www.googleapis.com/auth/youtube.force-ssl`
-- `https://www.googleapis.com/auth/yt-analytics.readonly`
-
-Сохранить. Раздел **Audience** не трогать: статус Publishing должен остаться
+Раздел **Audience** тоже не трогать: статус Publishing должен остаться
 **In production**. В режиме Testing Google отзывает refresh-токен через семь
 дней, и публикация встанет.
 
 ## 3. Выпустить токен
 
-Локально, на машине с браузером, после `git pull`:
+Локально, на машине с браузером:
 
 ```
 cd tools
