@@ -26,6 +26,8 @@ USED = os.path.join(CACHE, "used.json")
 REUSE_AFTER = 30 * 24 * 3600
 PER_PAGE = 40
 MIN_SECONDS = 8
+MAX_SECONDS = 40
+CACHE_LIMIT = 24
 
 DEFAULT_QUERIES = [
     "calm nature aerial", "rain on window", "ocean waves slow", "forest fog morning",
@@ -151,6 +153,17 @@ def download(url, path):
             f.write(chunk)
 
 
+def trim_cache(used):
+    """Держит кэш в пределах CACHE_LIMIT клипов: клипы по 20–100 МБ, диск не резиновый."""
+    clips = [f for f in os.listdir(CACHE) if f.endswith(".mp4")] if os.path.isdir(CACHE) else []
+    clips.sort(key=lambda f: used.get(f[:-4], 0))
+    for name in clips[:max(0, len(clips) - CACHE_LIMIT)]:
+        try:
+            os.remove(os.path.join(CACHE, name))
+        except OSError:
+            pass
+
+
 def from_cache(used):
     """Самый давно не показанный клип из кэша, если сток недоступен."""
     clips = [f for f in os.listdir(CACHE) if f.endswith(".mp4")] if os.path.isdir(CACHE) else []
@@ -177,8 +190,8 @@ def pick(topic, min_seconds=MIN_SECONDS, log=print):
                 log("Pexels не ответил на «%s»: %s" % (query, e))
                 continue
             candidates = [v for v in videos
-                          if v.get("duration", 0) >= min_seconds and fresh(v["id"], used)
-                          and best_file(v)]
+                          if min_seconds <= v.get("duration", 0) <= MAX_SECONDS
+                          and fresh(v["id"], used) and best_file(v)]
             if not candidates:
                 continue
             video = random.choice(candidates[:15])
@@ -191,6 +204,7 @@ def pick(topic, min_seconds=MIN_SECONDS, log=print):
                     continue
             used[str(video["id"])] = time.time()
             save_used(used)
+            trim_cache(used)
             log("Клип %d по запросу «%s», автор %s" % (video["id"], query, video.get("user", {}).get("name", "")))
             return path
         log("Сток не дал свежего клипа под тему «%s», беру из кэша" % topic)

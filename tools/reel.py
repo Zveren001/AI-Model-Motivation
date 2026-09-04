@@ -95,7 +95,8 @@ def render(quote, number, out_path, cta=False, clip=None, log=print):
                "-filter_complex", filters,
                "-map", "[v]", "-map", "[a]", "-t", "%.2f" % duration,
                "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
-               "-preset", "veryfast", "-crf", "22", "-r", str(FPS),
+               "-preset", "veryfast", "-crf", "24", "-maxrate", "6M", "-bufsize", "12M",
+               "-r", str(FPS),
                "-c:a", "aac", "-b:a", "160k", "-ar", "44100",
                "-movflags", "+faststart", out_path]
         try:
