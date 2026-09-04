@@ -5,3 +5,5 @@ __pycache__/
 post_log.json
 .autopost.lock
 output/
+footage/
+stats.json

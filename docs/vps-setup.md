@@ -16,6 +16,28 @@
 
 Картинки уходят в репозиторий `nika-media`, папка `motivation/`. Локальная копия удаляется сразу после успешной публикации, поэтому `output/` всегда пуст.
 
+## Ролики: голос и видеосток
+
+Ролик собирается из внешних сервисов, поэтому в окружении сервера нужен
+edge-tts, а в `.env` — ключ стока:
+
+```
+/opt/motivation/venv/bin/pip install edge-tts
+```
+
+В `/opt/motivation/.env` дописать (латиницей, через plink можно):
+
+```
+PEXELS_API_KEY=...       ключ с pexels.com/api
+REEL_SLOTS=18,21         слоты роликов по Москве
+VOICE_RATE=+0%           темп речи, при желании +5%
+```
+
+Клипы кэшируются в `/opt/motivation/footage/`, каталог создаётся сам.
+Проверка после установки: `../venv/bin/python autopost.py --dry-run --slot=18`
+должна собрать ролик в `output/` за одну-две минуты; в логе будут строки
+«Клип … по запросу …» и «Речь … с».
+
 ## Расписание
 
 Файл лежит в репозитории — `deploy/motivation.cron`, и ставится копированием:
@@ -29,10 +51,11 @@ systemctl restart cron
 Активные строки:
 
 ```
-0 21 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
-0 3  * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
+0 6  * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
 0 9  * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
 0 15 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
+0 18 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
+30 5 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python youtube_stats.py
 ```
 
 Это полночь, шесть утра, полдень и шесть вечера по Москве. Полуночный слот в UTC стоит на день раньше — скрипт считает московское время сам и запишет пост следующей датой.
@@ -43,7 +66,7 @@ systemctl restart cron
 
 Причина: `CRON_TZ` — расширение cronie из Red Hat, а в Debian и Ubuntu стоит vixie-cron, который такой переменной не знает. Ошибки при этом нет, задача просто работает по системному времени.
 
-Поэтому время задано прямо в UTC: **21:00 = 00:00 МСК**, **03:00 = 06:00 МСК**, **09:00 = 12:00 МСК**, **15:00 = 18:00 МСК**. Пересчёт безопасен навсегда — Москва с 2014 года стоит на UTC+3 и на летнее время не переходит.
+Поэтому время задано прямо в UTC: **06:00 = 09:00 МСК**, **09:00 = 12:00 МСК**, **15:00 = 18:00 МСК**, **18:00 = 21:00 МСК**, сбор статистики **05:30 = 08:30 МСК**. Пересчёт безопасен навсегда — Москва с 2014 года стоит на UTC+3 и на летнее время не переходит.
 
 Проверить, когда задача сработала на самом деле:
 
@@ -95,7 +118,7 @@ cd /opt/motivation/tools
 
 ```
 cd /opt/motivation/tools
-../venv/bin/python autopost.py --slot=6
+../venv/bin/python autopost.py --slot=9
 ```
 
 Статистика базы цитат:
@@ -130,9 +153,10 @@ cd /opt/motivation/tools
 Когда аккаунт устоится, в `/opt/motivation/.env` поменять:
 
 ```
-SLOTS=0,6,12,18
+SLOTS=9,12,18,21
+REEL_SLOTS=18,21
 ```
 
-Часы в `SLOTS` задаются по Москве, а строки в `deploy/motivation.cron` — в UTC. Оба места должны описывать одно и то же расписание: если добавить строку в cron и забыть про `SLOTS`, запуск произойдёт, но скрипт не найдёт подходящего слота и молча выйдет.
+Часы в `SLOTS` задаются по Москве, `REEL_SLOTS` — те из них, куда выходят ролики, а строки в `deploy/motivation.cron` — в UTC. Оба места должны описывать одно и то же расписание: если добавить строку в cron и забыть про `SLOTS`, запуск произойдёт, но скрипт не найдёт подходящего слота и молча выйдет.
 
 Четыре слота включены 25.08.2026.

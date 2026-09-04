@@ -55,8 +55,12 @@ def body(meta, video_path):
         return head + f.read() + tail
 
 
-def publish(video_path, title, description, tags=None, privacy="public"):
-    """Заливает ролик и возвращает его id."""
+def publish(video_path, title, description, tags=None, privacy="public", language="ru"):
+    """Заливает ролик и возвращает его id.
+
+    Язык задаётся явно: без него YouTube определяет аудиторию по косвенным
+    признакам, а ролик с русским текстом и без речи ему определить не по чему.
+    """
     if not os.path.exists(video_path):
         sys.exit("Файл не найден: %s" % video_path)
 
@@ -66,6 +70,8 @@ def publish(video_path, title, description, tags=None, privacy="public"):
             "description": description[:5000],
             "tags": tags or [],
             "categoryId": CATEGORY_MOTIVATION,
+            "defaultLanguage": language,
+            "defaultAudioLanguage": language,
         },
         "status": {
             "privacyStatus": privacy,

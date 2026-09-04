@@ -1,14 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Автопубликация цитаты по расписанию.
+"""Автопубликация по расписанию.
 
-Один запуск = один пост. Порядок: взять неиспользованную цитату, собрать
-материал, залить в хранилище, опубликовать, пометить цитату.
+Один запуск = один пост. Порядок: выбрать цитату, собрать материал, залить
+в хранилище, опубликовать, пометить цитату.
 
-Лента идёт циклом из четырёх: ролик белый, ролик чёрный, картинка белая,
-картинка чёрная. Цвет меняется каждую публикацию, формат — через два. Час
-публикации задаёт cron, минуты внутри часа добирает случайная пауза, поэтому
-ключ --now нужен ручному запуску, чтобы не ждать её. Ключ --kind задаёт тип
-принудительно, чередование дальше выправляется само.
+Тип публикации привязан к слоту: вечерние слоты из REEL_SLOTS отдают ролики,
+остальные — картинки. Картинки идут по порядку базы, их фон чередуется
+белый → чёрный от последней картинки. Ролик собирается из цитаты с развёрткой:
+крючок, объяснение, совет и вопрос озвучиваются, слова идут на экране в ритм
+речи поверх клипа из стока. Час публикации задаёт cron, минуты внутри часа
+добирает случайная пауза, поэтому ключ --now нужен ручному запуску, чтобы
+не ждать её. Ключ --kind задаёт тип принудительно.
+
+Половина роликов заканчивается призывом писать в комментарии, половина —
+только вопросом. Пока статистики мало, варианты чередуются поровну; дальше
+доля следует за просмотрами из stats.json, который собирает youtube_stats.py.
+Тема цитаты для ролика тоже выбирается по статистике: чаще из тем с лучшими
+просмотрами, иногда наугад, чтобы не застрять.
 
 Защита от повторов трёхуровневая, потому что cron может сработать
 дважды при перезапуске сервера или сдвиге времени:
@@ -33,6 +41,7 @@ import reel
 import render
 import threads_publish
 import youtube_publish
+import youtube_stats
 
 API = "https://graph.instagram.com/v21.0"
 
@@ -40,8 +49,8 @@ LOG_PATH = os.path.join(config.ROOT, "post_log.json")
 LOCK_PATH = os.path.join(config.ROOT, ".autopost.lock")
 RUN_LOG = os.path.join(config.ROOT, "autopost.log")
 
-# Блокировка переживает разброс времени вместе с рендером ролика: полчаса сна
-# плюс сборка видео легко перекрывают прежние пятнадцать минут.
+# Блокировка переживает разброс времени вместе со сборкой ролика: полчаса сна,
+# озвучка, скачивание клипа и кодирование легко перекрывают прежние пятнадцать минут.
 LOCK_TTL = 3600
 NET_ATTEMPTS = 8
 NET_DELAY = 20
@@ -53,11 +62,18 @@ CAPTION_TAGS = "#мотивация #цитаты #мысли #саморазв�
 
 # Вертикальное видео короче трёх минут YouTube сам относит к Shorts,
 # хэштег в описании только помогает ему определиться быстрее
-YOUTUBE_TAGS = "#shorts #мотивация #цитаты #саморазвитие"
-YOUTUBE_KEYWORDS = ["мотивация", "цитаты", "саморазвитие", "shorts"]
+YOUTUBE_TAGS = "#shorts #мотивация #саморазвитие"
+YOUTUBE_KEYWORDS = ["мотивация", "саморазвитие", "мысли", "психология", "shorts"]
+FOOTAGE_CREDIT = "Видеоряд: pexels.com"
 
 # Threads принимает ровно одну тему на пост, хэштеги внутри текста там не работают
 THREADS_TOPIC = "мотивация"
+
+# Доля роликов, где тема берётся наугад, а не из лучших по статистике,
+# и сколько роликов каждого варианта нужно, прежде чем верить их средним
+EXPLORE_SHARE = 0.3
+MIN_SAMPLES = 8
+TOP_TOPICS = 5
 
 # Расписание задано по Москве, а сервер живёт по UTC. Брать datetime.now()
 # нельзя: в 06:00 МСК скрипт увидел бы 03:00 и решил, что слот не наступил.
@@ -137,11 +153,18 @@ def drop_local(path):
         log("Не удалось убрать локальный файл: %s" % e)
 
 
+def hours(name, default):
+    return [int(s) for s in config.get(name, default).split(",") if s.strip()]
+
+
 def current_slot(now):
     """Ближайший слот из SLOTS, в который попадает текущий час."""
-    slots = [int(s) for s in config.get("SLOTS", "6,18").split(",") if s.strip()]
-    past = [s for s in slots if s <= now.hour]
+    past = [s for s in hours("SLOTS", "9,12,18,21") if s <= now.hour]
     return max(past) if past else None
+
+
+def kind_by_slot(slot):
+    return "reel" if slot in hours("REEL_SLOTS", "18,21") else "image"
 
 
 def already_posted(journal, day, slot):
@@ -158,18 +181,142 @@ def next_index(journal):
     return journal.get("counter", 0)
 
 
-def last_post(journal):
-    posts = journal.get("posts", {})
-    if not posts:
-        return None
-    return max(posts.values(), key=lambda p: p.get("at", ""))
+def posts_of(journal, kind):
+    return [p for p in journal.get("posts", {}).values() if p.get("kind", "image") == kind]
 
 
-def next_quote(data):
-    for q in data["quotes"]:
-        if not q.get("used"):
-            return q
-    return None
+def next_theme(journal):
+    """Цвет картинки противоположен последней картинке.
+
+    Считается от последней записи журнала, а не от счётчика: ручная
+    публикация и удаление поста из ленты счёт сдвигают, а чередование
+    должно следовать за тем, что зритель видит в ленте на самом деле.
+    Ролики с видеорядом в чередовании не участвуют.
+    """
+    images = posts_of(journal, "image")
+    if not images:
+        return "white"
+    last = max(images, key=lambda p: p.get("at", ""))
+    return "black" if last.get("theme") == "белый" else "white"
+
+
+def is_long(quote):
+    return all(quote.get(k) for k in ("hook", "reasoning", "action", "question"))
+
+
+def unused(quotes, long=None):
+    pool = [q for q in quotes["quotes"] if not q.get("used")]
+    if long is None:
+        return pool
+    return [q for q in pool if is_long(q) == long]
+
+
+def next_quote(quotes):
+    """Первая неиспользованная обычная цитата — для картинок порядок остаётся простым."""
+    pool = unused(quotes, long=False)
+    return pool[0] if pool else None
+
+
+def share_by_stats(journal, stats, field, value):
+    """Доля слотов для варианта поля по средним просмотрам роликов.
+
+    Пока роликов каждого варианта меньше MIN_SAMPLES, доля ровно половина.
+    Дальше она следует за результатом, но держится в пределах 25–75 %:
+    проигравший вариант должен продолжать проверяться, иначе случайный
+    провал первых роликов закрыл бы его навсегда.
+    """
+    scored = {}
+    for post in posts_of(journal, "reel"):
+        score = youtube_stats.video_score(stats, post.get("youtube_id"))
+        if score is None or field not in post:
+            continue
+        scored.setdefault(post[field], []).append(score)
+
+    mine = scored.get(value, [])
+    others = [s for k, v in scored.items() if k != value for s in v]
+    if len(mine) < MIN_SAMPLES or len(others) < MIN_SAMPLES:
+        return 0.5
+    a, b = sum(mine) / len(mine), sum(others) / len(others)
+    if a + b == 0:
+        return 0.5
+    return min(0.75, max(0.25, a / (a + b)))
+
+
+def pick_by_share(share, ordinal):
+    """Ровно половина — чередование по порядку, иначе розыгрыш по доле."""
+    if share == 0.5:
+        return ordinal % 2 == 0
+    return random.random() < share
+
+
+def topic_scores(journal, stats, by_id):
+    scores = {}
+    for post in posts_of(journal, "reel"):
+        score = youtube_stats.video_score(stats, post.get("youtube_id"))
+        quote = by_id.get(post.get("quote_id"))
+        if score is None or not quote:
+            continue
+        scores.setdefault(quote["topic"], []).append(score)
+    return {t: sum(v) / len(v) for t, v in scores.items()}
+
+
+def choose_reel_quote(pool, journal, stats, by_id):
+    """Тема для ролика: чаще из лучших по просмотрам, иногда наугад.
+
+    Лучшие темы разыгрываются пропорционально их среднему, а не берётся
+    одна верхняя: с парой роликов на тему среднее ещё слишком шумное.
+    """
+    if not pool:
+        return None, "нет цитат"
+    scores = topic_scores(journal, stats, by_id)
+    if not scores or random.random() < EXPLORE_SHARE:
+        return random.choice(pool), "наугад"
+
+    ranked = sorted(scores, key=scores.get, reverse=True)
+    weighted = [(t, scores[t]) for t in ranked[:TOP_TOPICS]
+                if any(q["topic"] == t for q in pool) and scores[t] > 0]
+    if not weighted:
+        return random.choice(pool), "наугад"
+
+    roll = random.uniform(0, sum(w for _, w in weighted))
+    for topic, weight in weighted:
+        roll -= weight
+        if roll <= 0:
+            break
+    return random.choice([q for q in pool if q["topic"] == topic]), "по статистике"
+
+
+def choose_reel(quotes, journal, stats):
+    """Цитата с развёрткой и вариант призыва для следующего ролика."""
+    by_id = {q["id"]: q for q in quotes["quotes"]}
+    reels = posts_of(journal, "reel")
+    quote, how = choose_reel_quote(unused(quotes, long=True), journal, stats, by_id)
+    cta = pick_by_share(share_by_stats(journal, stats, "cta", True), len(reels))
+    return quote, cta, how
+
+
+def caption_for(quote, long):
+    parts = [quote["text"]]
+    if long:
+        parts = [quote["hook"], quote["reasoning"] + " " + quote["action"], quote["question"]]
+    return "\n\n".join(parts + [CAPTION_TAGS])
+
+
+def topic_tag(topic):
+    return "#" + re.sub(r"[^\w]", "", topic)
+
+
+def youtube_meta(quote):
+    """Заголовок, описание и ключевые слова ролика для YouTube."""
+    hook = quote["hook"].strip()
+    joined = "%s %s" % (hook, quote["text"]) if hook[-1] in "?!" \
+        else "%s. %s" % (hook.rstrip("."), quote["text"])
+    title = joined if len(joined) <= 100 else hook
+    description = "\n\n".join([
+        quote["hook"], quote["reasoning"] + " " + quote["action"], quote["question"],
+        FOOTAGE_CREDIT, "%s %s" % (YOUTUBE_TAGS, topic_tag(quote["topic"])),
+    ])
+    return title[:100], description, YOUTUBE_KEYWORDS + [quote["topic"]]
 
 
 def publish(fields, caption, attempts=20):
@@ -211,37 +358,6 @@ def publish_reel(url, caption):
     """Ролик обрабатывается дольше картинки, поэтому ждём вчетверо терпеливее."""
     return publish({"media_type": "REELS", "video_url": url,
                     "share_to_feed": "true"}, caption, attempts=48)
-
-
-# Цикл ленты: цвет меняется каждую публикацию, формат идёт парами.
-# Чередовать через один и цвет, и формат одновременно нельзя — периоды
-# совпадут, и цвет намертво прилипнет к формату: все ролики станут чёрными,
-# все картинки белыми. Приоритет отдан цвету, поэтому форматы идут по два.
-CYCLE = [("reel", "white"), ("reel", "black"), ("image", "white"), ("image", "black")]
-
-
-def next_cycle_pos(journal):
-    """Позиция следующей публикации в цикле.
-
-    Считается от последней записи журнала, а не от сквозного счётчика:
-    ручная публикация и удаление поста из ленты сдвигают счёт, а позиция
-    в цикле должна следовать за тем, что зритель видит в ленте на самом деле.
-    """
-    last = last_post(journal)
-    if last is None or "cycle" not in last:
-        return 0
-    return (last["cycle"] + 1) % len(CYCLE)
-
-
-def number_of_kind(journal, kind):
-    """Порядковый номер внутри своего типа — по нему идёт эффект ролика.
-
-    Считается по журналу, а не делением сквозного счётчика: ручной запуск
-    с принудительным типом сбил бы деление, и ролик повторил бы эффект
-    дважды подряд. Записи без пометки типа — картинки, они старше пометки.
-    """
-    return sum(1 for p in journal.get("posts", {}).values()
-               if p.get("kind", "image") == kind)
 
 
 def sleep_jitter():
@@ -290,31 +406,41 @@ def main():
             log("Не найдена база цитат: %s" % config.QUOTES)
             return 1
 
-        quote = next_quote(quotes)
-        if not quote:
-            log("Все цитаты использованы, база требует пополнения")
-            return 1
+        kind = force_kind or kind_by_slot(slot)
+        cta, how = None, "по порядку"
+        if kind == "reel":
+            quote, cta, how = choose_reel(quotes, journal, youtube_stats.load())
+            if not quote:
+                log("Цитаты с развёрткой закончились, нужна новая партия")
+                return 1
+        else:
+            quote = next_quote(quotes)
+            if not quote:
+                log("Все цитаты использованы, база требует пополнения")
+                return 1
 
         index = next_index(journal)
-        pos = next_cycle_pos(journal)
-        cycle_kind, cycle_theme = CYCLE[pos]
-        kind = force_kind or cycle_kind
-        number = number_of_kind(journal, kind)
-        theme = "белый" if cycle_theme == "white" else "чёрный"
-        log("Слот %02d:00, пост #%d, %s, фон %s, цитата #%d: %s"
-            % (slot, index + 1, "ролик" if kind == "reel" else "картинка",
-               theme, quote["id"], quote["text"]))
+        theme_en = next_theme(journal) if kind == "image" else None
+        theme = {"white": "белый", "black": "чёрный"}.get(theme_en)
+        what = "ролик%s" % (" с призывом" if cta else "") if kind == "reel" else "картинка"
+        log("Слот %02d:00, пост #%d, %s%s, тема «%s» %s, цитата #%d: %s"
+            % (slot, index + 1, what, ", фон %s" % theme if theme else "",
+               quote["topic"], how, quote["id"], quote["text"]))
 
+        clip, duration = None, None
         if kind == "reel":
             name = "%s_%02d.mp4" % (now.date().isoformat(), slot)
             media_path = os.path.join(config.OUTPUT, name)
-            _, effect, _ = reel.render(quote["text"], number, media_path,
-                                       theme=cycle_theme)
-            log("Ролик собран: %s, эффект %s" % (name, effect))
+            try:
+                _, clip, duration, _ = reel.render(quote, index, media_path, cta=cta, log=log)
+            except RuntimeError as e:
+                log("Ролик не собран, слот пропущен: %s" % e)
+                return 1
+            log("Ролик собран: %s, клип %s, %.1f с" % (name, clip, duration))
         else:
             name = "%s_%02d.jpg" % (now.date().isoformat(), slot)
             media_path = os.path.join(config.OUTPUT, name)
-            render.render(quote["text"], 0 if cycle_theme == "white" else 1, media_path)
+            render.render(quote["text"], 0 if theme_en == "white" else 1, media_path)
             log("Картинка отрисована: %s" % name)
 
         if dry:
@@ -326,13 +452,14 @@ def main():
 
         if not wait_for_network():
             log("Сеть недоступна, публикация отложена")
+            drop_local(media_path)
             return 1
 
         key = "motivation/%s" % os.path.basename(media_path)
         media_url = github_upload.upload(media_path, key)
         log("Загружено: %s" % media_url)
 
-        caption = "%s\n\n%s" % (quote["text"], CAPTION_TAGS)
+        caption = caption_for(quote, kind == "reel")
         try:
             if kind == "reel":
                 media_id = publish_reel(media_url, caption)
@@ -346,11 +473,10 @@ def main():
 
         youtube_id = None
         if kind == "reel" and youtube_publish.configured():
+            title, description, keywords = youtube_meta(quote)
             try:
                 youtube_id, privacy = youtube_publish.publish(
-                    media_path, quote["text"],
-                    quote["text"] + "\n\n" + YOUTUBE_TAGS,
-                    tags=YOUTUBE_KEYWORDS)
+                    media_path, title, description, tags=keywords)
                 log("YouTube: опубликовано, id %s, доступ %s" % (youtube_id, privacy))
             except (urllib.error.HTTPError, urllib.error.URLError, ValueError, KeyError) as e:
                 detail = e.read().decode()[:400] if hasattr(e, "read") else str(e)
@@ -371,12 +497,16 @@ def main():
 
         journal.setdefault("posts", {})["%s_%02d" % (now.date().isoformat(), slot)] = {
             "quote_id": quote["id"],
+            "topic": quote["topic"],
             "media_id": media_id,
             "thread_id": thread_id,
             "index": index,
+            "slot": slot,
             "kind": kind,
+            "cta": cta,
+            "clip": clip,
+            "duration": duration,
             "youtube_id": youtube_id,
-            "cycle": pos,
             "theme": theme,
             "at": now.isoformat(timespec="seconds"),
         }
@@ -385,10 +515,14 @@ def main():
 
         drop_local(media_path)
 
-        left = sum(1 for q in quotes["quotes"] if not q.get("used"))
-        log("Опубликовано, media_id %s. Осталось цитат: %d" % (media_id, left))
+        left = len(unused(quotes, long=False))
+        left_long = len(unused(quotes, long=True))
+        log("Опубликовано, media_id %s. Осталось цитат для картинок: %d, с развёрткой: %d"
+            % (media_id, left, left_long))
         if left < 10:
             log("ВНИМАНИЕ: цитаты заканчиваются, пополни quotes/quotes.json")
+        if left_long < 10:
+            log("ВНИМАНИЕ: развёрнутые цитаты заканчиваются, нужна новая партия")
         return 0
 
     finally:

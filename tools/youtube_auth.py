@@ -22,7 +22,14 @@ import config
 
 AUTH = "https://accounts.google.com/o/oauth2/auth"
 TOKEN = "https://oauth2.googleapis.com/token"
-SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+# Загрузка, управление каналом (комментарии, плейлисты, описание) и чтение
+# аналитики. Токен получает права, активные в момент выпуска: добавил право —
+# выпускай заново.
+SCOPE = " ".join([
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.force-ssl",
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
+])
 PORT = 8723
 
 _code = {}
