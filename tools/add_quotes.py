@@ -271,15 +271,12 @@ def stats():
     data = load()
     quotes = data["quotes"]
     used = sum(1 for q in quotes if q.get("used"))
-    long_left = sum(1 for q in quotes if is_long(q) and not q.get("used"))
     topics = {}
     for q in quotes:
         topics[q["topic"]] = topics.get(q["topic"], 0) + 1
 
     print("всего цитат: %d" % len(quotes))
     print("использовано: %d, осталось: %d" % (used, len(quotes) - used))
-    print("с развёрткой осталось: %d — хватит на %d дней при двух роликах в сутки"
-          % (long_left, long_left // 2))
     print("тем: %d" % len(topics))
     print("хватит на %d дней при 2 постах, на %d при 4"
           % ((len(quotes) - used) // 2, (len(quotes) - used) // 4))

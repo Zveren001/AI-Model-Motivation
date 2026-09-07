@@ -170,7 +170,11 @@ def collect():
         print("Data API: %s" % explain(e))
         return None
 
-    since = min(parse_time(p["at"]) for p in posts.values()).date().isoformat()
+    # Аналитика ведёт учёт по тихоокеанскому времени: ролик, вышедший вечером
+    # по Москве, попадает у неё в предыдущие сутки. Без запаса в день первые
+    # часы жизни ролика, самые важные, в отчёт не войдут.
+    first = min(parse_time(p["at"]) for p in posts.values()).date()
+    since = (first - datetime.timedelta(days=1)).isoformat()
     try:
         deep = fetch_analytics(token, ids, since)
     except urllib.error.HTTPError as e:
@@ -210,30 +214,32 @@ def summary(stats):
     posts = journal_videos()
     topics = topics_by_quote()
     print("Обновлено: %s, роликов: %d" % (stats.get("updated"), len(stats.get("videos", {}))))
-    print("%-12s %7s %6s %6s %6s %6s  %-6s %-14s %s"
-          % ("дата", "просм", "вовл%", "лайки", "комм", "оценка", "формат", "тема", "цитата"))
-    groups = {"format": {}, "cta": {}, "topic": {}}
+    print("%-11s %6s %6s %6s %6s %5s %5s %5s  %-13s %s"
+          % ("выход", "просм", "сутки", "вовл%", "досм%", "лайк", "комм", "подп",
+             "тема", "цитата"))
+    groups = {"cta": {}, "effect": {}, "topic": {}}
     for video_id, video in sorted(stats.get("videos", {}).items(),
                                   key=lambda kv: kv[1].get("published", "")):
         post = posts.get(video_id, {})
         share = engaged_share(video)
         score = video_score(stats, video_id)
-        print("%-12s %7d %6s %6d %6d %6s  %-6s %-14s #%s"
-              % (video.get("published", "")[:10], video.get("views", 0),
-                 "%.0f" % (share * 100) if share is not None else "-",
-                 video.get("likes", 0), video.get("comments", 0),
+        topic = post.get("topic") or topics.get(video.get("quote_id"), "")
+        print("%-11s %6d %6s %6s %6s %5d %5d %5d  %-13s #%s"
+              % (video.get("published", "")[5:16].replace("T", " "),
+                 video.get("views", 0),
                  score if score is not None else "-",
-                 post.get("format") or "short",
-                 post.get("topic") or topics.get(video.get("quote_id"), ""),
-                 video.get("quote_id")))
+                 "%.0f" % (share * 100) if share is not None else "-",
+                 "%.0f" % video["view_pct"] if video.get("view_pct") else "-",
+                 video.get("likes", 0), video.get("comments", 0),
+                 video.get("subscribers", 0), topic, video.get("quote_id")))
         if score is None:
             continue
         for field in groups:
-            value = post.get(field) if field != "topic" else                 post.get("topic") or topics.get(video.get("quote_id"))
+            value = topic if field == "topic" else post.get(field)
             if value is not None:
                 groups[field].setdefault(value, []).append(score)
 
-    for field, label in (("format", "Формат"), ("cta", "Призыв"), ("topic", "Тема")):
+    for field, label in (("cta", "Призыв"), ("effect", "Эффект"), ("topic", "Тема")):
         if not groups[field]:
             continue
         print()
