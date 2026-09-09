@@ -44,6 +44,10 @@ BRIGHT = r"\alpha&H00&"
 DIM = r"\alpha&H78&"
 FADE_BACK = 450
 
+# Цвет текста и обводки в порядке ASS: &HAABBGGRR
+LIGHT_ON_DARK = ("&H00FFFFFF", "&H00000000")
+DARK_ON_LIGHT = ("&H001A1A1A", "&H00FFFFFF")
+
 # Чем оформлен момент, когда слово произносят. Пятый эффект отличается
 # не оформлением, а таймингом: слова строки загораются разом.
 EFFECTS = {
@@ -144,7 +148,8 @@ def stamp(seconds):
                                seconds % 60)
 
 
-def header(size):
+def header(size, colors=LIGHT_ON_DARK):
+    primary, outline_colour = colors
     lines = [
         "[Script Info]", "ScriptType: v4.00+",
         "PlayResX: %d" % WIDTH, "PlayResY: %d" % HEIGHT, "WrapStyle: 2", "",
@@ -153,10 +158,14 @@ def header(size):
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
     ]
+    thin = colors == DARK_ON_LIGHT
     for name, base, outline, shadow, align, margin_v in STYLES:
-        lines.append("Style: %s,%s,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,"
+        if thin:
+            outline, shadow = max(2, outline - 4), max(1, shadow - 2)
+        lines.append("Style: %s,%s,%d,%s,%s,%s,&H64000000,"
                      "1,0,0,0,100,100,0,0,1,%d,%d,%d,%d,%d,%d,1"
                      % (name, FONT, size if name == "Quote" else base,
+                        primary, primary, outline_colour,
                         outline, shadow, align, MARGIN, MARGIN, margin_v))
     lines += ["", "[Events]",
               "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"]
@@ -180,7 +189,7 @@ def lit_tags(effect, x, y):
     return at(x, y) + shape + BRIGHT
 
 
-def write(words, cta, duration, out_path, effect="zagoranie"):
+def write(words, cta, duration, out_path, effect="zagoranie", colors=LIGHT_ON_DARK):
     """Пишет ASS: слова цитаты загораются по таймингам речи, в конце призыв.
 
     words — [(начало, конец, слово)] по цитате, cta — (начало, конец, текст)
@@ -198,7 +207,7 @@ def write(words, cta, duration, out_path, effect="zagoranie"):
         starts = line_starts(lines, starts)
 
     quote_end = cta[0] if cta else duration - FADE_BACK / 1000.0
-    out = header(size)
+    out = header(size, colors)
 
     # Приглушённое слово лежит нижним слоем всю дорогу, загоревшееся ложится
     # поверх: иначе слово, которое выезжает снизу, на время полёта исчезает

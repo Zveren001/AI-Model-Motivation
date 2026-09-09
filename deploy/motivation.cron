@@ -4,19 +4,23 @@
 # это расширение cronie из Red Hat, в Debian и Ubuntu его нет. Строка CRON_TZ
 # молча игнорируется, и задача уходит на три часа позже задуманного.
 #
-# 06:00 UTC = 09:00 МСК  картинка
-# 09:00 UTC = 12:00 МСК  картинка
-# 15:00 UTC = 18:00 МСК  ролик
-# 18:00 UTC = 21:00 МСК  ролик
+# 06:00 UTC = 09:00 МСК  утро
+# 10:00 UTC = 13:00 МСК  день
+# 16:00 UTC = 19:00 МСК  вечер
+# 21:00 UTC = 00:00 МСК  ночь, следующего календарного дня
 # 05:30 UTC = 08:30 МСК  сбор статистики YouTube, до первого слота
 #
-# Ролики стоят вечером: первые часы после выхода решают, пойдёт ли Shorts
-# дальше тестовой порции показов, а ночью аудитория спит.
+# В каждый слот на YouTube уходит ролик, формат фона идёт ротацией: за четыре
+# дня каждый формат успевает побывать в каждом слоте. В утренние слоты
+# в Instagram вместо ролика уходит картинка — там лента остаётся прежней.
+#
+# Полуночный слот стоит в UTC на день раньше: скрипт считает московское
+# время сам и запишет пост в журнал уже следующей датой.
 #
 # Пересчёт безопасен навсегда: Москва с 2014 года стоит на UTC+3 и на летнее
 # время не переходит.
 #
-# Часы слотов дублируются в SLOTS и REEL_SLOTS в .env — при изменении править оба места.
+# Часы слотов дублируются в SLOTS и IMAGE_SLOTS в .env — при изменении править оба места.
 #
 # Точное время внутри часа задаёт не cron, а сам скрипт: он выжидает от 15 до
 # 30 минут случайно, поэтому посты выходят между HH:15 и HH:30, а не секунда
@@ -39,7 +43,7 @@ SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 0 6  * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
-0 9  * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
-0 15 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
-0 18 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
+0 10 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
+0 16 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
+0 21 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
 30 5 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python youtube_stats.py >> /opt/motivation/cron.log 2>&1

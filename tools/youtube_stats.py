@@ -217,7 +217,7 @@ def summary(stats):
     print("%-11s %6s %6s %6s %6s %5s %5s %5s  %-13s %s"
           % ("выход", "просм", "сутки", "вовл%", "досм%", "лайк", "комм", "подп",
              "тема", "цитата"))
-    groups = {"cta": {}, "effect": {}, "topic": {}}
+    groups = {"style": {}, "cta": {}, "effect": {}, "topic": {}}
     for video_id, video in sorted(stats.get("videos", {}).items(),
                                   key=lambda kv: kv[1].get("published", "")):
         post = posts.get(video_id, {})
@@ -239,7 +239,8 @@ def summary(stats):
             if value is not None:
                 groups[field].setdefault(value, []).append(score)
 
-    for field, label in (("cta", "Призыв"), ("effect", "Эффект"), ("topic", "Тема")):
+    for field, label in (("style", "Формат"), ("cta", "Призыв"),
+                         ("effect", "Эффект"), ("topic", "Тема")):
         if not groups[field]:
             continue
         print()

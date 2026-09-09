@@ -4,14 +4,17 @@
 Один запуск = один пост. Порядок: выбрать цитату, собрать материал, залить
 в хранилище, опубликовать, пометить цитату.
 
-Тип публикации привязан к слоту: вечерние слоты из REEL_SLOTS отдают ролики,
-остальные — картинки. Картинка — цитата на однотонном фоне, фон чередуется
-белый и чёрный от последней картинки. Ролик — та же цитата голосом поверх
-клипа из стока, слова загораются в ритм речи, в конце короткий призыв.
+На YouTube в каждый из четырёх слотов уходит ролик, и формат фона идёт
+ротацией: однотонный, сток, градиент, немой. За четыре дня каждый формат
+успевает побывать в каждом слоте, поэтому время суток не смешивается
+с форматом и сравнение остаётся честным.
+
+Лента Instagram не меняется: в утренние слоты из IMAGE_SLOTS туда уходит
+картинка на однотонном фоне, в остальные — тот же ролик, что и на YouTube.
 
 Час публикации задаёт cron, минуты внутри часа добирает случайная пауза,
-поэтому ключ --now нужен ручному запуску, чтобы не ждать её. Ключ --kind
-задаёт тип принудительно, --cta — вариант призыва.
+поэтому ключ --now нужен ручному запуску, чтобы не ждать её. Ключи --style,
+--cta и --effect задают формат, призыв и эффект принудительно.
 
 Тема ролика выбирается по статистике из stats.json, которую раз в сутки
 собирает youtube_stats.py: чаще из тем с лучшими просмотрами, иногда наугад.
@@ -164,14 +167,30 @@ def hours(name, default):
     return [int(s) for s in config.get(name, default).split(",") if s.strip()]
 
 
+def slots():
+    return hours("SLOTS", "9,13,19,0")
+
+
 def current_slot(now):
     """Ближайший слот из SLOTS, в который попадает текущий час."""
-    past = [s for s in hours("SLOTS", "9,12,18,21") if s <= now.hour]
+    past = [s for s in slots() if s <= now.hour]
     return max(past) if past else None
 
 
-def kind_by_slot(slot):
-    return "reel" if slot in hours("REEL_SLOTS", "18,21") else "image"
+def instagram_image(slot):
+    return slot in hours("IMAGE_SLOTS", "9,13")
+
+
+def style_for(now, slot):
+    """Формат фона по дате и месту слота в расписании.
+
+    Ротация, а не статистика: пока форматов четыре и данных мало, важно
+    чтобы каждый успел побывать в каждом слоте, иначе время суток
+    и формат окажутся неразделимы.
+    """
+    order = slots()
+    index = order.index(slot) if slot in order else 0
+    return reel.STYLES[(now.date().toordinal() + index) % len(reel.STYLES)]
 
 
 def already_posted(journal, day, slot):
@@ -188,7 +207,7 @@ def next_index(journal):
     return journal.get("counter", 0)
 
 
-def posts_of(journal, kind):
+def posts_of(journal, kind="reel"):
     return [p for p in journal.get("posts", {}).values() if p.get("kind", "image") == kind]
 
 
@@ -200,11 +219,11 @@ def next_theme(journal):
     должно следовать за тем, что зритель видит в ленте на самом деле.
     Ролики с видеорядом в чередовании не участвуют.
     """
-    images = posts_of(journal, "image")
+    images = [p for p in journal.get("posts", {}).values() if p.get("ig_kind") == "image"]
     if not images:
         return "white"
     last = max(images, key=lambda p: p.get("at", ""))
-    return "black" if last.get("theme") == "белый" else "white"
+    return "black" if last.get("ig_theme") == "белый" else "white"
 
 
 def unused(quotes):
@@ -361,16 +380,16 @@ def sleep_jitter():
 def main():
     dry = "--dry-run" in sys.argv
     force_slot = None
-    force_kind = None
+    force_style = None
     force_cta = None
     force_effect = None
     for a in sys.argv:
         if a.startswith("--slot="):
             force_slot = int(a.split("=", 1)[1])
-        elif a.startswith("--kind="):
-            force_kind = a.split("=", 1)[1]
-            if force_kind not in ("image", "reel"):
-                sys.exit("Ключ --kind принимает image или reel")
+        elif a.startswith("--style="):
+            force_style = a.split("=", 1)[1]
+            if force_style not in reel.STYLES:
+                sys.exit("Ключ --style принимает %s" % ", ".join(reel.STYLES))
         elif a.startswith("--cta="):
             force_cta = a.split("=", 1)[1]
             if force_cta not in CTA_KINDS:
@@ -403,43 +422,40 @@ def main():
             log("Не найдена база цитат: %s" % config.QUOTES)
             return 1
 
-        kind = force_kind or kind_by_slot(slot)
-        cta, effect, how = None, None, "по порядку"
-        if kind == "reel":
-            stats = youtube_stats.load()
-            quote, how = choose_reel_quote(quotes, journal, stats)
-            cta = force_cta or choose_variant(journal, stats, "cta", CTA_KINDS)
-            effect = force_effect or choose_variant(journal, stats, "effect", EFFECT_KINDS)
-        else:
-            quote = next_quote(quotes)
+        stats = youtube_stats.load()
+        quote, how = choose_reel_quote(quotes, journal, stats)
         if not quote:
             log("Все цитаты использованы, база требует пополнения")
             return 1
 
-        index = next_index(journal)
-        theme_en = next_theme(journal) if kind == "image" else None
-        theme = {"white": "белый", "black": "чёрный"}.get(theme_en)
-        what = ("ролик, призыв %s, эффект %s" % (cta, effect) if kind == "reel"
-                else "картинка, фон %s" % theme)
-        log("Слот %02d:00, пост #%d, %s, тема «%s» %s, цитата #%d: %s"
-            % (slot, index + 1, what, quote["topic"], how, quote["id"], quote["text"]))
+        style = force_style or style_for(now, slot)
+        cta = force_cta or choose_variant(journal, stats, "cta", CTA_KINDS)
+        effect = force_effect or choose_variant(journal, stats, "effect", EFFECT_KINDS)
 
-        clip, duration = None, None
-        if kind == "reel":
-            name = "%s_%02d.mp4" % (now.date().isoformat(), slot)
-            media_path = os.path.join(config.OUTPUT, name)
-            try:
-                _, clip, duration, effect = reel.render(quote, index, media_path,
-                                                        cta=cta, effect=effect, log=log)
-            except RuntimeError as e:
-                log("Ролик не собран, слот пропущен: %s" % e)
-                return 1
-            log("Ролик собран: %s, клип %s, %.1f с" % (name, clip, duration))
-        else:
-            name = "%s_%02d.jpg" % (now.date().isoformat(), slot)
-            media_path = os.path.join(config.OUTPUT, name)
-            render.render(quote["text"], 0 if theme_en == "white" else 1, media_path)
-            log("Картинка отрисована: %s" % name)
+        index = next_index(journal)
+        day = now.date().isoformat()
+        log("Слот %02d:00, пост #%d, формат %s, призыв %s, эффект %s, тема «%s» %s, цитата #%d: %s"
+            % (slot, index + 1, style, cta, effect, quote["topic"], how,
+               quote["id"], quote["text"]))
+
+        media_path = os.path.join(config.OUTPUT, "%s_%02d.mp4" % (day, slot))
+        try:
+            _, source, duration, meta = reel.render(quote, index, media_path,
+                                                    style=style, cta=cta,
+                                                    effect=effect, log=log)
+        except RuntimeError as e:
+            log("Ролик не собран, слот пропущен: %s" % e)
+            return 1
+        log("Ролик собран: %s, %.1f с" % (source, duration))
+
+        ig_kind = "image" if instagram_image(slot) else "reel"
+        ig_theme_en = next_theme(journal) if ig_kind == "image" else None
+        ig_theme = {"white": "белый", "black": "чёрный"}.get(ig_theme_en)
+        ig_path = media_path
+        if ig_kind == "image":
+            ig_path = os.path.join(config.OUTPUT, "%s_%02d.jpg" % (day, slot))
+            render.render(quote["text"], 0 if ig_theme_en == "white" else 1, ig_path)
+            log("Картинка для Instagram отрисована, фон %s" % ig_theme)
 
         if dry:
             log("Проверка завершена, ничего не отправлено")
@@ -451,15 +467,16 @@ def main():
         if not wait_for_network():
             log("Сеть недоступна, публикация отложена")
             drop_local(media_path)
+            if ig_path != media_path:
+                drop_local(ig_path)
             return 1
 
-        key = "motivation/%s" % os.path.basename(media_path)
-        media_url = github_upload.upload(media_path, key)
+        media_url = github_upload.upload(ig_path, "motivation/%s" % os.path.basename(ig_path))
         log("Загружено: %s" % media_url)
 
         caption = caption_for(quote)
         try:
-            if kind == "reel":
+            if ig_kind == "reel":
                 media_id = publish_reel(media_url, caption)
             else:
                 media_id = publish_image(media_url, caption)
@@ -467,10 +484,12 @@ def main():
             body = e.read().decode()[:400] if hasattr(e, "read") else str(e)
             log("ОШИБКА публикации: %s" % body)
             drop_local(media_path)
+            if ig_path != media_path:
+                drop_local(ig_path)
             return 1
 
         youtube_id = None
-        if kind == "reel" and youtube_publish.configured():
+        if youtube_publish.configured():
             title, description, keywords = youtube_meta(quote)
             try:
                 youtube_id, privacy = youtube_publish.publish(
@@ -481,7 +500,7 @@ def main():
                 log("YouTube не принял ролик: %s" % detail)
 
         thread_id = None
-        if kind == "image" and config.get("THREADS_ACCESS_TOKEN"):
+        if ig_kind == "image" and config.get("THREADS_ACCESS_TOKEN"):
             try:
                 thread_id = threads_publish.publish(quote["text"], media_url, THREADS_TOPIC)
                 log("Threads: опубликовано, id %s" % thread_id)
@@ -493,26 +512,31 @@ def main():
         quote["used_at"] = now.isoformat(timespec="seconds")
         save_json(config.QUOTES, quotes)
 
-        journal.setdefault("posts", {})["%s_%02d" % (now.date().isoformat(), slot)] = {
+        journal.setdefault("posts", {})["%s_%02d" % (day, slot)] = {
             "quote_id": quote["id"],
             "topic": quote["topic"],
             "media_id": media_id,
             "thread_id": thread_id,
             "index": index,
             "slot": slot,
-            "kind": kind,
+            "kind": "reel",
+            "style": meta["style"],
             "cta": cta,
-            "effect": effect,
-            "clip": clip,
+            "effect": meta["effect"],
+            "theme": meta["theme"],
+            "source": source,
             "duration": duration,
             "youtube_id": youtube_id,
-            "theme": theme,
+            "ig_kind": ig_kind,
+            "ig_theme": ig_theme,
             "at": now.isoformat(timespec="seconds"),
         }
         journal["counter"] = index + 1
         save_json(LOG_PATH, journal)
 
         drop_local(media_path)
+        if ig_path != media_path:
+            drop_local(ig_path)
 
         left = len(unused(quotes))
         log("Опубликовано, media_id %s. Осталось цитат: %d" % (media_id, left))

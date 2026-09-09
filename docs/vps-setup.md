@@ -29,7 +29,7 @@ edge-tts, а в `.env` — ключ стока:
 
 ```
 PEXELS_API_KEY=...       ключ с pexels.com/api
-REEL_SLOTS=18,21         слоты роликов по Москве
+IMAGE_SLOTS=9,13         слоты, где в Instagram уходит картинка
 VOICE_RATE=+0%           темп речи, при желании +5%
 ```
 
@@ -52,9 +52,9 @@ systemctl restart cron
 
 ```
 0 6  * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
-0 9  * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
-0 15 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
-0 18 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
+0 10 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
+0 16 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
+0 21 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py
 30 5 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python youtube_stats.py
 ```
 
@@ -66,7 +66,7 @@ systemctl restart cron
 
 Причина: `CRON_TZ` — расширение cronie из Red Hat, а в Debian и Ubuntu стоит vixie-cron, который такой переменной не знает. Ошибки при этом нет, задача просто работает по системному времени.
 
-Поэтому время задано прямо в UTC: **06:00 = 09:00 МСК**, **09:00 = 12:00 МСК**, **15:00 = 18:00 МСК**, **18:00 = 21:00 МСК**, сбор статистики **05:30 = 08:30 МСК**. Пересчёт безопасен навсегда — Москва с 2014 года стоит на UTC+3 и на летнее время не переходит.
+Поэтому время задано прямо в UTC: **06:00 = 09:00 МСК**, **10:00 = 13:00 МСК**, **16:00 = 19:00 МСК**, **21:00 = полночь МСК** следующего дня, сбор статистики **05:30 = 08:30 МСК**. Пересчёт безопасен навсегда — Москва с 2014 года стоит на UTC+3 и на летнее время не переходит.
 
 Проверить, когда задача сработала на самом деле:
 
@@ -118,7 +118,7 @@ cd /opt/motivation/tools
 
 ```
 cd /opt/motivation/tools
-../venv/bin/python autopost.py --slot=9
+../venv/bin/python autopost.py --slot=9 --now
 ```
 
 Статистика базы цитат:
@@ -153,10 +153,10 @@ cd /opt/motivation/tools
 Когда аккаунт устоится, в `/opt/motivation/.env` поменять:
 
 ```
-SLOTS=9,12,18,21
-REEL_SLOTS=18,21
+SLOTS=9,13,19,0
+IMAGE_SLOTS=9,13
 ```
 
-Часы в `SLOTS` задаются по Москве, `REEL_SLOTS` — те из них, куда выходят ролики, а строки в `deploy/motivation.cron` — в UTC. Оба места должны описывать одно и то же расписание: если добавить строку в cron и забыть про `SLOTS`, запуск произойдёт, но скрипт не найдёт подходящего слота и молча выйдет.
+Часы в `SLOTS` задаются по Москве, `IMAGE_SLOTS` — те из них, где в Instagram вместо ролика уходит картинка, а строки в `deploy/motivation.cron` — в UTC. Оба места должны описывать одно и то же расписание: если добавить строку в cron и забыть про `SLOTS`, запуск произойдёт, но скрипт не найдёт подходящего слота и молча выйдет.
 
 Четыре слота включены 25.08.2026.

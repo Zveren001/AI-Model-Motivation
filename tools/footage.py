@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Вертикальный видеоряд под ролик из бесплатного стока Pexels.
 
-Клип ищется по ключевым словам темы цитаты, скачивается в кэш и не
+Клип ищется по очередному запросу из списка, скачивается в кэш и не
 повторяется раньше чем через месяц. Ключ PEXELS_API_KEY в .env, лимит
 200 запросов в час — при двух роликах в сутки это ничто.
 
@@ -34,75 +34,6 @@ DEFAULT_QUERIES = [
     "city lights night", "walking alone street", "mountains clouds timelapse",
     "sunrise field", "river flowing", "snow falling", "lake reflection", "desk work laptop",
 ]
-
-TOPIC_QUERIES = {
-    "тревога": ["rain on window", "storm clouds", "night city rain"],
-    "спокойствие": ["calm lake", "ocean waves slow", "fog forest"],
-    "тишина": ["snow falling", "calm lake", "candle"],
-    "фокус": ["desk work laptop", "writing notebook", "coffee desk"],
-    "действие": ["running road morning", "walking street", "climbing mountain"],
-    "начало": ["sunrise field", "road morning", "open door light"],
-    "путь": ["road aerial", "walking trail", "train window"],
-    "время": ["clock", "timelapse city", "sand"],
-    "работа": ["desk work laptop", "workshop hands", "typing keyboard"],
-    "труд": ["workshop hands", "typing keyboard", "construction sunset"],
-    "дисциплина": ["running track", "gym training", "early morning street"],
-    "привычки": ["morning routine coffee", "running road morning", "notebook writing"],
-    "прокрастинация": ["clock", "empty desk", "rain window"],
-    "лень": ["morning bed light", "clock", "rain window"],
-    "здоровье": ["running park", "water drink", "forest walk"],
-    "спорт": ["running track", "gym training", "swimming"],
-    "отдых": ["hammock", "beach sunset", "reading book"],
-    "забота": ["tea cup window", "blanket cozy", "walking park"],
-    "страх": ["dark forest fog", "cliff edge", "night road"],
-    "риск": ["cliff edge", "surfing wave", "highway night"],
-    "смелость": ["mountain summit", "surfing wave", "jump water"],
-    "ошибки": ["broken glass", "rain street", "notebook crumpled"],
-    "рост": ["plant growing timelapse", "sunrise mountains", "tree forest"],
-    "обучение": ["library books", "writing notebook", "reading"],
-    "мастерство": ["craftsman hands", "pottery", "workshop"],
-    "цель": ["mountain summit", "archery", "road horizon"],
-    "мечта": ["stars night sky", "sky clouds", "sea horizon"],
-    "деньги": ["city skyline", "coins", "office window"],
-    "отношения": ["couple walking", "holding hands", "friends laughing"],
-    "семья": ["family walk", "home kitchen", "children park"],
-    "границы": ["fence field", "door closing", "window rain"],
-    "окружение": ["friends talking", "crowd street", "cafe people"],
-    "поддержка": ["holding hands", "friends hug", "tea together"],
-    "одиночество": ["alone bench", "empty beach", "window night"],
-    "сравнение": ["crowd walking", "mirror", "city people"],
-    "принятие": ["calm lake", "sunset beach", "hands open"],
-    "честность": ["mirror", "candle", "window light"],
-    "выбор": ["crossroads", "fork road", "doors"],
-    "перемены": ["seasons timelapse", "leaves falling", "sunrise"],
-    "счастье": ["sunlight field", "laughing", "beach sunset"],
-    "мысли": ["clouds timelapse", "window rain", "night sky"],
-    "мышление": ["chess", "notebook", "clouds"],
-    "терпение": ["plant growing timelapse", "sand hourglass", "river slow"],
-    "упорство": ["climbing", "running rain", "waves rocks"],
-    "утро": ["sunrise", "morning coffee", "morning light window"],
-    "возраст": ["old hands", "autumn leaves", "tree"],
-    "жизнь": ["city timelapse", "sea horizon", "field wind"],
-    "смысл": ["stars night", "candle", "sea horizon"],
-    "надежда": ["sunrise", "light through clouds", "rainbow"],
-    "вера": ["light through clouds", "candle", "sunrise"],
-    "творчество": ["painting", "guitar", "notebook sketch"],
-    "простота": ["minimal room", "tea", "field"],
-    "характер": ["mountain", "rock waves", "storm"],
-    "ответственность": ["hands work", "keys", "desk"],
-    "уважение": ["handshake", "tea together", "walking together"],
-    "доброта": ["helping hand", "smile", "flowers"],
-    "внимание": ["eye close", "candle", "coffee steam"],
-    "настоящее": ["sunlight leaves", "coffee steam", "walking"],
-    "итоги": ["sunset", "notebook", "road"],
-    "зрелость": ["autumn", "old tree", "calm sea"],
-    "самопознание": ["mirror", "walking alone", "lake reflection"],
-}
-
-
-def queries_for(topic):
-    return TOPIC_QUERIES.get(topic, []) + DEFAULT_QUERIES
-
 
 def load_used():
     if not os.path.exists(USED):
@@ -173,17 +104,21 @@ def from_cache(used):
     return os.path.join(CACHE, clips[0])
 
 
-def pick(topic, min_seconds=MIN_SECONDS, log=print):
-    """Путь к клипу под тему: свежий из стока, иначе давний из кэша."""
+def pick_clip(number, min_seconds=MIN_SECONDS, log=print):
+    """Путь к клипу: свежий из стока по очередному запросу, иначе давний из кэша.
+
+    Запрос берётся по счётчику роликов, а не по теме цитаты: под цитату
+    из общей базы точный клип всё равно не подобрать, а по кругу фон
+    хотя бы не повторяется.
+    """
     os.makedirs(CACHE, exist_ok=True)
     used = load_used()
     key = config.get("PEXELS_API_KEY")
 
     if key:
-        queries = queries_for(topic)
-        own = queries[:3]
-        random.shuffle(own)
-        for query in own + queries[3:6]:
+        start = number % len(DEFAULT_QUERIES)
+        queries = DEFAULT_QUERIES[start:] + DEFAULT_QUERIES[:start]
+        for query in queries[:6]:
             try:
                 videos = search(query, key)
             except Exception as e:  # noqa: BLE001
@@ -207,7 +142,7 @@ def pick(topic, min_seconds=MIN_SECONDS, log=print):
             trim_cache(used)
             log("Клип %d по запросу «%s», автор %s" % (video["id"], query, video.get("user", {}).get("name", "")))
             return path
-        log("Сток не дал свежего клипа под тему «%s», беру из кэша" % topic)
+        log("Сток не дал свежего клипа, беру из кэша")
     else:
         log("PEXELS_API_KEY не задан, беру клип из кэша")
 
@@ -219,8 +154,8 @@ def pick(topic, min_seconds=MIN_SECONDS, log=print):
 
 
 def main():
-    topic = sys.argv[1] if len(sys.argv) > 1 else "спокойствие"
-    path = pick(topic)
+    number = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+    path = pick_clip(number)
     print("клип:", path)
     return 0 if path else 1
 
