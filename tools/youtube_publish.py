@@ -12,12 +12,17 @@ import json
 import mimetypes
 import os
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
 import config
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
+COMMENT_URL = "https://www.googleapis.com/youtube/v3/commentThreads?part=snippet"
+COMMENT_ATTEMPTS = 3
+COMMENT_DELAY = 45
 UPLOAD_URL = ("https://www.googleapis.com/upload/youtube/v3/videos"
               "?uploadType=multipart&part=snippet,status")
 
@@ -87,6 +92,30 @@ def publish(video_path, title, description, tags=None, privacy="public", languag
         result = json.loads(resp.read())
 
     return result.get("id"), result.get("status", {}).get("privacyStatus")
+
+
+def comment(video_id, text):
+    """Первый комментарий от канала под роликом; возвращает id ветки комментариев.
+
+    Сразу после загрузки ролик ещё обрабатывается и комментарии к нему
+    могут не приниматься, поэтому попытка повторяется с паузой.
+    """
+    body = json.dumps({"snippet": {"videoId": video_id,
+                                   "topLevelComment": {"snippet": {"textOriginal": text}}}},
+                      ensure_ascii=False).encode("utf-8")
+    last = None
+    for attempt in range(COMMENT_ATTEMPTS):
+        if attempt:
+            time.sleep(COMMENT_DELAY)
+        req = urllib.request.Request(COMMENT_URL, data=body, method="POST")
+        req.add_header("Authorization", "Bearer %s" % access_token())
+        req.add_header("Content-Type", "application/json; charset=UTF-8")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read()).get("id")
+        except urllib.error.HTTPError as e:
+            last = "%s %s" % (e.code, e.read().decode("utf-8", "replace")[:300])
+    raise RuntimeError("комментарий не принят: %s" % last)
 
 
 def main():

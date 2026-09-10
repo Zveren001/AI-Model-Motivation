@@ -1,31 +1,26 @@
 # -*- coding: utf-8 -*-
-"""Автопубликация по расписанию.
+"""Автопубликация по расписанию: один запуск — один ролик на YouTube и в Instagram.
 
-Один запуск = один пост. Порядок: выбрать цитату, собрать материал, залить
-в хранилище, опубликовать, пометить цитату.
+Сначала выходят готовые утверждённые ролики из очереди queue/ — их человек
+посмотрел и одобрил целиком. Когда очередь кончается, ролик собирается
+движком compose из цитаты, одобренной в таблице (quotes/approved.json):
+других цитат автопост не берёт, и если утверждённых не осталось, слот
+пропускается. Эффект, обработка фона, подача текста и голос идут по кругу
+только среди одобренных вариантов; голос звучит в двух слотах из четырёх,
+и какие это слоты, меняется по дням, чтобы голос не срастался со временем.
 
-На YouTube в каждый из четырёх слотов уходит ролик, и формат фона идёт
-ротацией: однотонный, сток, градиент, немой. За четыре дня каждый формат
-успевает побывать в каждом слоте, поэтому время суток не смешивается
-с форматом и сравнение остаётся честным.
-
-Лента Instagram не меняется: в утренние слоты из IMAGE_SLOTS туда уходит
-картинка на однотонном фоне, в остальные — тот же ролик, что и на YouTube.
+Под роликом на YouTube первым комментарием от канала выходит вопрос
+с выбором из двух вариантов; в Instagram — тоже, если у токена есть право
+на комментарии, иначе это только отмечается в логе.
 
 Час публикации задаёт cron, минуты внутри часа добирает случайная пауза,
-поэтому ключ --now нужен ручному запуску, чтобы не ждать её. Ключи --style,
---cta и --effect задают формат, призыв и эффект принудительно.
-
-Тема ролика выбирается по статистике из stats.json, которую раз в сутки
-собирает youtube_stats.py: чаще из тем с лучшими просмотрами, иногда наугад.
-Тема, вышедшая в двух последних роликах, пропускается — иначе выбор
-залипает на одной теме и лента выглядит как повтор. Призывы идут по кругу,
-пока по каждому не наберётся статистика, дальше чаще выходит лучший.
+поэтому ключ --now нужен ручному запуску, чтобы не ждать её.
 
 Защита от повторов трёхуровневая, потому что cron может сработать
 дважды при перезапуске сервера или сдвиге времени:
-1. Флаг used у цитаты — использованная не берётся заново.
-2. Журнал post_log.json — по нему считается, сколько ушло за слот.
+1. Журнал post_log.json — какой слот какого дня отработан и какие ролики
+   и цитаты уже вышли.
+2. Сверка текста цитаты с журналом — одна мысль не выходит дважды.
 3. Файл блокировки — от двух одновременных запусков.
 """
 
@@ -38,21 +33,22 @@ import sys
 import time
 import urllib.error
 
-import captions
+import add_quotes
+import compose
 import config
+import footage
 import github_upload
 import meta_net
-import reel
-import render
-import threads_publish
+import typefx
 import youtube_publish
-import youtube_stats
 
 API = "https://graph.instagram.com/v21.0"
 
 LOG_PATH = os.path.join(config.ROOT, "post_log.json")
 LOCK_PATH = os.path.join(config.ROOT, ".autopost.lock")
 RUN_LOG = os.path.join(config.ROOT, "autopost.log")
+QUEUE_DIR = os.path.join(config.ROOT, "queue")
+APPROVED = os.path.join(config.ROOT, "quotes", "approved.json")
 
 # Блокировка переживает разброс времени вместе со сборкой ролика: полчаса сна,
 # озвучка, скачивание клипа и кодирование легко перекрывают прежние пятнадцать минут.
@@ -71,18 +67,10 @@ YOUTUBE_TAGS = "#shorts #мотивация #цитаты"
 YOUTUBE_KEYWORDS = ["мотивация", "цитаты", "саморазвитие", "мысли", "shorts"]
 FOOTAGE_CREDIT = "Видеоряд: pexels.com"
 
-# Threads принимает ровно одну тему на пост, хэштеги внутри текста там не работают
-THREADS_TOPIC = "мотивация"
-
-CTA_KINDS = ("comment", "subscribe", "like")
-EFFECT_KINDS = captions.EFFECT_ORDER
-
-# Доля роликов, где тема берётся наугад, а не из лучших по статистике;
-# сколько роликов нужно на вариант, прежде чем верить его среднему;
-# сколько последних тем под запретом
-EXPLORE_SHARE = 0.3
-MIN_SAMPLES = 6
-TOP_TOPICS = 6
+# Только варианты, одобренные на утверждении образцов 10.09.2026
+EFFECTS = typefx.ORDER
+GRADES = ("dark", "blur", "bw", "warm", "zoom")
+VOICES = ("обычный", "медленный", "бодрый", "с акцентом", "низкий")
 TOPIC_COOLDOWN = 2
 
 # Расписание задано по Москве, а сервер живёт по UTC. Брать datetime.now()
@@ -153,7 +141,7 @@ def wait_for_network():
 
 
 def drop_local(path):
-    """Файл уже в хранилище — локальная копия не нужна ни после успеха, ни после сбоя.
+    """Собранный ролик уже в хранилище — локальная копия не нужна ни после успеха, ни после сбоя.
 
     Без этого затяжной сбой публикации копил бы в output по файлу на каждый запуск.
     """
@@ -177,167 +165,96 @@ def current_slot(now):
     return max(past) if past else None
 
 
-def instagram_image(slot):
-    return slot in hours("IMAGE_SLOTS", "9,13")
-
-
-def style_for(now, slot):
-    """Формат фона по дате и месту слота в расписании.
-
-    Ротация, а не статистика: пока форматов четыре и данных мало, важно
-    чтобы каждый успел побывать в каждом слоте, иначе время суток
-    и формат окажутся неразделимы.
-    """
-    order = slots()
-    index = order.index(slot) if slot in order else 0
-    return reel.STYLES[(now.date().toordinal() + index) % len(reel.STYLES)]
-
-
 def already_posted(journal, day, slot):
     key = "%s_%02d" % (day.isoformat(), slot)
     return key in journal.get("posts", {})
 
 
-def next_index(journal):
-    """Сквозной номер публикации.
-
-    Считается по журналу, а не по часу: при любом наборе слотов
-    нумерация остаётся строгой и после сбоя не сбивается.
-    """
-    return journal.get("counter", 0)
+def reels(journal):
+    return [p for p in journal.get("posts", {}).values() if p.get("kind") == "reel"]
 
 
-def posts_of(journal, kind="reel"):
-    return [p for p in journal.get("posts", {}).values() if p.get("kind", "image") == kind]
+def published_texts(journal):
+    return {add_quotes.normalize(p["text"]) for p in reels(journal) if p.get("text")}
 
 
-def next_theme(journal):
-    """Цвет картинки противоположен последней картинке.
-
-    Считается от последней записи журнала, а не от счётчика: ручная
-    публикация и удаление поста из ленты счёт сдвигают, а чередование
-    должно следовать за тем, что зритель видит в ленте на самом деле.
-    Ролики с видеорядом в чередовании не участвуют.
-    """
-    images = [p for p in journal.get("posts", {}).values() if p.get("ig_kind") == "image"]
-    if not images:
-        return "white"
-    last = max(images, key=lambda p: p.get("at", ""))
-    return "black" if last.get("ig_theme") == "белый" else "white"
+def recent_topics(journal):
+    ordered = sorted(reels(journal), key=lambda p: p.get("at", ""))
+    return {p.get("topic") for p in ordered[-TOPIC_COOLDOWN:] if p.get("topic")}
 
 
-def unused(quotes):
-    return [q for q in quotes["quotes"] if not q.get("used")]
-
-
-def next_quote(quotes):
-    """Первая неиспользованная цитата — для картинок порядок остаётся простым."""
-    pool = unused(quotes)
-    return pool[0] if pool else None
-
-
-def scores_by(journal, stats, field, by_id=None):
-    """Средние оценки роликов, сгруппированные по полю журнала или по теме цитаты."""
-    groups = {}
-    for post in posts_of(journal, "reel"):
-        score = youtube_stats.video_score(stats, post.get("youtube_id"))
-        if score is None:
+def next_queue_item(journal):
+    """Первый готовый ролик очереди, который ещё не выходил."""
+    queue = load_json(os.path.join(QUEUE_DIR, "queue.json"), {"items": []})
+    done = {p.get("sample") for p in reels(journal)} - {None}
+    texts = published_texts(journal)
+    for item in queue["items"]:
+        if item["sample"] in done or add_quotes.normalize(item["text"]) in texts:
             continue
-        if field == "topic":
-            quote = (by_id or {}).get(post.get("quote_id"))
-            value = post.get("topic") or (quote or {}).get("topic")
-        else:
-            value = post.get(field)
-        if value is not None:
-            groups.setdefault(value, []).append(score)
-    return groups
+        if os.path.exists(os.path.join(QUEUE_DIR, item["file"])):
+            return item
+        log("В очереди нет файла %s, пропускаю" % item["file"])
+    return None
 
 
-def weighted_choice(pairs):
-    """Случайный элемент с вероятностью, пропорциональной весу."""
-    roll = random.uniform(0, sum(w for _, w in pairs))
-    for value, weight in pairs:
-        roll -= weight
-        if roll <= 0:
-            return value
-    return pairs[-1][0]
+def next_approved_quote(journal):
+    """Первая утверждённая цитата, которая ещё не выходила и не повторяет тему соседей."""
+    texts = published_texts(journal)
+    fresh = [q for q in load_json(APPROVED, {"quotes": []})["quotes"]
+             if add_quotes.normalize(q["text"]) not in texts]
+    skip = recent_topics(journal)
+    return next((q for q in fresh if q["topic"] not in skip), fresh[0] if fresh else None)
 
 
-def recent_topics(journal, by_id):
-    """Темы двух последних роликов — их следующий ролик пропускает."""
-    reels = sorted(posts_of(journal, "reel"), key=lambda p: p.get("at", ""))
-    out = set()
-    for post in reels[-TOPIC_COOLDOWN:]:
-        quote = by_id.get(post.get("quote_id"))
-        topic = post.get("topic") or (quote or {}).get("topic")
-        if topic:
-            out.add(topic)
-    return out
+def voiced_slot(now, slot):
+    """Голос в двух слотах из четырёх; по чётным дням — в первом и третьем, по нечётным — во втором и четвёртом."""
+    order = slots()
+    index = order.index(slot) if slot in order else 0
+    return (now.date().toordinal() + index) % 2 == 0
 
 
-def choose_variant(journal, stats, field, kinds):
-    """Вариант поля: по кругу, пока мало данных, дальше чаще лучший."""
-    groups = scores_by(journal, stats, field)
-    if any(len(groups.get(k, [])) < MIN_SAMPLES for k in kinds):
-        return kinds[len(posts_of(journal, "reel")) % len(kinds)]
-    return weighted_choice([(k, sum(groups[k]) / len(groups[k])) for k in kinds])
+def engine_variant(journal, now, slot):
+    """Эффект, фон, подача текста и голос для ролика, собираемого движком.
 
-
-def choose_reel_quote(quotes, journal, stats):
-    """Цитата для ролика: тема чаще из лучших по просмотрам, иногда наугад.
-
-    Лучшие темы разыгрываются пропорционально их среднему, а не берётся
-    одна верхняя: с парой роликов на тему среднее ещё слишком шумное.
+    Эффектов девять, фонов пять — числа взаимно простые, поэтому по кругу
+    за 45 роликов выпадают все их сочетания.
     """
-    by_id = {q["id"]: q for q in quotes["quotes"]}
-    skip = recent_topics(journal, by_id)
-    pool = [q for q in unused(quotes) if q["topic"] not in skip] or unused(quotes)
-    if not pool:
-        return None, "нет цитат"
-
-    groups = scores_by(journal, stats, "topic", by_id)
-    means = {t: sum(v) / len(v) for t, v in groups.items() if t not in skip}
-    if not means or random.random() < EXPLORE_SHARE:
-        return random.choice(pool), "наугад"
-
-    ranked = sorted(means, key=means.get, reverse=True)[:TOP_TOPICS]
-    weighted = [(t, means[t]) for t in ranked
-                if means[t] > 0 and any(q["topic"] == t for q in pool)]
-    if not weighted:
-        return random.choice(pool), "наугад"
-
-    topic = weighted_choice(weighted)
-    return random.choice([q for q in pool if q["topic"] == topic]), "по статистике"
+    built = [p for p in reels(journal) if p.get("source") == "engine"]
+    n = len(built)
+    voice = "нет"
+    if voiced_slot(now, slot):
+        voice = VOICES[sum(1 for p in built if p.get("voice") not in (None, "нет")) % len(VOICES)]
+    return {"effect": EFFECTS[n % len(EFFECTS)], "grade": GRADES[n % len(GRADES)],
+            "text_style": "крупно" if n % 3 == 2 else "тень", "voice": voice}
 
 
-def caption_for(quote):
-    return "%s\n\n%s" % (quote["text"], CAPTION_TAGS)
+def caption_for(text):
+    return "%s\n\n%s" % (text, CAPTION_TAGS)
 
 
 def topic_tag(topic):
     return "#" + re.sub(r"[^\w]", "", topic)
 
 
-def youtube_meta(quote):
+def youtube_meta(text, topic):
     """Заголовок, описание и ключевые слова ролика для YouTube."""
-    description = "\n\n".join([quote["text"], FOOTAGE_CREDIT,
-                               "%s %s" % (YOUTUBE_TAGS, topic_tag(quote["topic"]))])
-    return quote["text"][:100], description, YOUTUBE_KEYWORDS + [quote["topic"]]
+    description = "\n\n".join([text, FOOTAGE_CREDIT, "%s %s" % (YOUTUBE_TAGS, topic_tag(topic))])
+    return text[:100], description, YOUTUBE_KEYWORDS + [topic]
 
 
-def publish(fields, caption, attempts=20):
-    """Публикует материал в Instagram по готовой ссылке. Возвращает media_id."""
+def publish_reel(url, caption, attempts=48):
+    """Публикует ролик в Instagram по готовой ссылке и возвращает media_id.
+
+    Видео обрабатывается дольше картинки, поэтому статус опрашивается терпеливо.
+    """
     user_id = config.get("IG_USER_ID", required=True)
     token = config.get("IG_ACCESS_TOKEN", required=True)
-
-    payload = dict(fields)
-    payload["caption"] = caption
-    payload["access_token"] = token
-
-    container = meta_net.post("%s/%s/media" % (API, user_id), payload)
+    container = meta_net.post("%s/%s/media" % (API, user_id), {
+        "media_type": "REELS", "video_url": url, "share_to_feed": "true",
+        "caption": caption, "access_token": token})
     creation_id = container["id"]
 
-    for attempt in range(attempts):
+    for _ in range(attempts):
         time.sleep(5)
         status = meta_net.get("%s/%s" % (API, creation_id),
                               {"fields": "status_code", "access_token": token})
@@ -345,25 +262,20 @@ def publish(fields, caption, attempts=20):
         if code == "FINISHED":
             break
         if code == "ERROR":
-            raise RuntimeError("Instagram не смог обработать материал")
+            raise RuntimeError("Instagram не смог обработать ролик")
     else:
         raise RuntimeError("Контейнер не обработался за отведённое время")
 
     result = meta_net.post("%s/%s/media_publish" % (API, user_id), {
-        "creation_id": creation_id,
-        "access_token": token,
-    })
+        "creation_id": creation_id, "access_token": token})
     return result.get("id")
 
 
-def publish_image(url, caption):
-    return publish({"image_url": url}, caption)
-
-
-def publish_reel(url, caption):
-    """Ролик обрабатывается дольше картинки, поэтому ждём вчетверо терпеливее."""
-    return publish({"media_type": "REELS", "video_url": url,
-                    "share_to_feed": "true"}, caption, attempts=48)
+def instagram_comment(media_id, text):
+    """Первый комментарий в Instagram; нужно право instagram_business_manage_comments."""
+    result = meta_net.post("%s/%s/comments" % (API, media_id), {
+        "message": text, "access_token": config.get("IG_ACCESS_TOKEN", required=True)})
+    return result.get("id")
 
 
 def sleep_jitter():
@@ -377,27 +289,51 @@ def sleep_jitter():
     time.sleep(delay)
 
 
+def error_text(e):
+    return e.read().decode("utf-8", "replace")[:400] if hasattr(e, "read") else str(e)
+
+
+def prepare(journal, now, slot, day, force, engine_only):
+    """Ролик для слота: готовый из очереди или собранный движком. None — публиковать нечего."""
+    item = None if engine_only else next_queue_item(journal)
+    if item:
+        path = os.path.join(QUEUE_DIR, item["file"])
+        log("Готовый ролик из очереди, образец №%02d: %s" % (item["sample"], item["text"]))
+        return dict(item, path=path, source="queue", quote_id=None, clip=item["clip_id"])
+
+    quote = next_approved_quote(journal)
+    if not quote:
+        log("Утверждённые цитаты закончились — слот пропущен, нужна новая партия")
+        return None
+    variant = engine_variant(journal, now, slot)
+    variant.update({k: v for k, v in force.items() if v})
+    log("Сборка по утверждённой цитате #%d «%s»: эффект %s, фон %s, текст %s, голос %s"
+        % (quote["id"], quote["text"], variant["effect"], variant["grade"],
+           variant["text_style"], variant["voice"]))
+    clip = footage.pick_for_query(quote["query"], log=log)
+    if not clip:
+        log("Нет видеоряда: сток недоступен и кэш пуст — слот пропущен")
+        return None
+    path = os.path.join(config.OUTPUT, "%s_%02d.mp4" % (day, slot))
+    duration = compose.render(quote["text"], path, clip, variant["effect"], variant["grade"],
+                              variant["text_style"], variant["voice"], seed=quote["id"])
+    log("Ролик собран: %.1f с" % duration)
+    return dict(variant, path=path, source="engine", sample=None, quote_id=quote["id"],
+                text=quote["text"], topic=quote["topic"], question=quote["question"],
+                clip=os.path.basename(clip)[:-4], duration=duration)
+
+
 def main():
     dry = "--dry-run" in sys.argv
+    engine_only = "--engine" in sys.argv
     force_slot = None
-    force_style = None
-    force_cta = None
-    force_effect = None
+    force = {"effect": None, "grade": None, "text_style": None, "voice": None}
     for a in sys.argv:
         if a.startswith("--slot="):
             force_slot = int(a.split("=", 1)[1])
-        elif a.startswith("--style="):
-            force_style = a.split("=", 1)[1]
-            if force_style not in reel.STYLES:
-                sys.exit("Ключ --style принимает %s" % ", ".join(reel.STYLES))
-        elif a.startswith("--cta="):
-            force_cta = a.split("=", 1)[1]
-            if force_cta not in CTA_KINDS:
-                sys.exit("Ключ --cta принимает %s" % ", ".join(CTA_KINDS))
-        elif a.startswith("--effect="):
-            force_effect = a.split("=", 1)[1]
-            if force_effect not in EFFECT_KINDS:
-                sys.exit("Ключ --effect принимает %s" % ", ".join(EFFECT_KINDS))
+        for key in force:
+            if a.startswith("--%s=" % key.replace("_", "-")):
+                force[key] = a.split("=", 1)[1]
 
     log("=" * 55)
     log("Запуск" + (" (проверка, без отправки)" if dry else ""))
@@ -413,52 +349,21 @@ def main():
             return 0
 
         journal = load_json(LOG_PATH, {"posts": {}})
+        day = now.date().isoformat()
         if already_posted(journal, now.date(), slot):
             log("Слот %02d:00 сегодня уже отработан, выхожу" % slot)
             return 0
 
-        quotes = load_json(config.QUOTES, None)
-        if not quotes:
-            log("Не найдена база цитат: %s" % config.QUOTES)
+        index = journal.get("counter", 0)
+        log("Слот %02d:00, пост #%d" % (slot, index + 1))
+        post = prepare(journal, now, slot, day, force, engine_only)
+        if not post:
             return 1
-
-        stats = youtube_stats.load()
-        quote, how = choose_reel_quote(quotes, journal, stats)
-        if not quote:
-            log("Все цитаты использованы, база требует пополнения")
-            return 1
-
-        style = force_style or style_for(now, slot)
-        cta = force_cta or choose_variant(journal, stats, "cta", CTA_KINDS)
-        effect = force_effect or choose_variant(journal, stats, "effect", EFFECT_KINDS)
-
-        index = next_index(journal)
-        day = now.date().isoformat()
-        log("Слот %02d:00, пост #%d, формат %s, призыв %s, эффект %s, тема «%s» %s, цитата #%d: %s"
-            % (slot, index + 1, style, cta, effect, quote["topic"], how,
-               quote["id"], quote["text"]))
-
-        media_path = os.path.join(config.OUTPUT, "%s_%02d.mp4" % (day, slot))
-        try:
-            _, source, duration, meta = reel.render(quote, index, media_path,
-                                                    style=style, cta=cta,
-                                                    effect=effect, log=log)
-        except RuntimeError as e:
-            log("Ролик не собран, слот пропущен: %s" % e)
-            return 1
-        log("Ролик собран: %s, %.1f с" % (source, duration))
-
-        ig_kind = "image" if instagram_image(slot) else "reel"
-        ig_theme_en = next_theme(journal) if ig_kind == "image" else None
-        ig_theme = {"white": "белый", "black": "чёрный"}.get(ig_theme_en)
-        ig_path = media_path
-        if ig_kind == "image":
-            ig_path = os.path.join(config.OUTPUT, "%s_%02d.jpg" % (day, slot))
-            render.render(quote["text"], 0 if ig_theme_en == "white" else 1, ig_path)
-            log("Картинка для Instagram отрисована, фон %s" % ig_theme)
 
         if dry:
             log("Проверка завершена, ничего не отправлено")
+            if post["source"] == "engine":
+                drop_local(post["path"])
             return 0
 
         if "--now" not in sys.argv:
@@ -466,82 +371,67 @@ def main():
 
         if not wait_for_network():
             log("Сеть недоступна, публикация отложена")
-            drop_local(media_path)
-            if ig_path != media_path:
-                drop_local(ig_path)
+            if post["source"] == "engine":
+                drop_local(post["path"])
             return 1
 
-        media_url = github_upload.upload(ig_path, "motivation/%s" % os.path.basename(ig_path))
+        name = "%s_%02d.mp4" % (day, slot)
+        media_url = github_upload.upload(post["path"], "motivation/%s" % name)
         log("Загружено: %s" % media_url)
 
-        caption = caption_for(quote)
         try:
-            if ig_kind == "reel":
-                media_id = publish_reel(media_url, caption)
-            else:
-                media_id = publish_image(media_url, caption)
+            media_id = publish_reel(media_url, caption_for(post["text"]))
         except (urllib.error.HTTPError, RuntimeError, KeyError) as e:
-            body = e.read().decode()[:400] if hasattr(e, "read") else str(e)
-            log("ОШИБКА публикации: %s" % body)
-            drop_local(media_path)
-            if ig_path != media_path:
-                drop_local(ig_path)
+            log("ОШИБКА публикации в Instagram: %s" % error_text(e))
+            if post["source"] == "engine":
+                drop_local(post["path"])
             return 1
+        log("Instagram: опубликовано, media_id %s" % media_id)
 
-        youtube_id = None
+        ig_comment = None
+        try:
+            ig_comment = instagram_comment(media_id, post["question"])
+            log("Instagram: первый комментарий %s" % ig_comment)
+        except (urllib.error.HTTPError, RuntimeError, KeyError, ValueError) as e:
+            log("Instagram не принял комментарий: %s" % error_text(e))
+
+        youtube_id, yt_comment = None, None
         if youtube_publish.configured():
-            title, description, keywords = youtube_meta(quote)
+            title, description, keywords = youtube_meta(post["text"], post["topic"])
             try:
                 youtube_id, privacy = youtube_publish.publish(
-                    media_path, title, description, tags=keywords)
+                    post["path"], title, description, tags=keywords)
                 log("YouTube: опубликовано, id %s, доступ %s" % (youtube_id, privacy))
-            except (urllib.error.HTTPError, urllib.error.URLError, ValueError, KeyError) as e:
-                detail = e.read().decode()[:400] if hasattr(e, "read") else str(e)
-                log("YouTube не принял ролик: %s" % detail)
-
-        thread_id = None
-        if ig_kind == "image" and config.get("THREADS_ACCESS_TOKEN"):
-            try:
-                thread_id = threads_publish.publish(quote["text"], media_url, THREADS_TOPIC)
-                log("Threads: опубликовано, id %s" % thread_id)
-            except (urllib.error.HTTPError, RuntimeError, KeyError) as e:
-                body = e.read().decode()[:400] if hasattr(e, "read") else str(e)
-                log("Threads не принял пост: %s" % body)
-
-        quote["used"] = True
-        quote["used_at"] = now.isoformat(timespec="seconds")
-        save_json(config.QUOTES, quotes)
+                yt_comment = youtube_publish.comment(youtube_id, post["question"])
+                log("YouTube: первый комментарий %s" % yt_comment)
+            except (urllib.error.HTTPError, urllib.error.URLError, RuntimeError,
+                    ValueError, KeyError) as e:
+                log("YouTube: сбой — %s" % error_text(e))
 
         journal.setdefault("posts", {})["%s_%02d" % (day, slot)] = {
-            "quote_id": quote["id"],
-            "topic": quote["topic"],
-            "media_id": media_id,
-            "thread_id": thread_id,
-            "index": index,
-            "slot": slot,
-            "kind": "reel",
-            "style": meta["style"],
-            "cta": cta,
-            "effect": meta["effect"],
-            "theme": meta["theme"],
-            "source": source,
-            "duration": duration,
-            "youtube_id": youtube_id,
-            "ig_kind": ig_kind,
-            "ig_theme": ig_theme,
-            "at": now.isoformat(timespec="seconds"),
+            "kind": "reel", "source": post["source"], "sample": post.get("sample"),
+            "quote_id": post.get("quote_id"), "text": post["text"], "topic": post["topic"],
+            "question": post["question"], "effect": post["effect"], "grade": post["grade"],
+            "text_style": post["text_style"], "voice": post["voice"], "clip": post["clip"],
+            "duration": post["duration"], "media_id": media_id, "ig_comment": ig_comment,
+            "youtube_id": youtube_id, "yt_comment": yt_comment, "index": index,
+            "slot": slot, "at": now.isoformat(timespec="seconds"),
         }
         journal["counter"] = index + 1
         save_json(LOG_PATH, journal)
 
-        drop_local(media_path)
-        if ig_path != media_path:
-            drop_local(ig_path)
+        if post["source"] == "engine":
+            drop_local(post["path"])
 
-        left = len(unused(quotes))
-        log("Опубликовано, media_id %s. Осталось цитат: %d" % (media_id, left))
-        if left < 10:
-            log("ВНИМАНИЕ: цитаты заканчиваются, пополни quotes/quotes.json")
+        texts = published_texts(journal)
+        queue = load_json(os.path.join(QUEUE_DIR, "queue.json"), {"items": []})["items"]
+        queue_left = sum(1 for i in queue if add_quotes.normalize(i["text"]) not in texts)
+        approved_left = sum(1 for q in load_json(APPROVED, {"quotes": []})["quotes"]
+                            if add_quotes.normalize(q["text"]) not in texts)
+        log("Опубликовано. Готовых роликов в очереди: %d, утверждённых цитат: %d"
+            % (queue_left, approved_left))
+        if queue_left + approved_left < 20:
+            log("ВНИМАНИЕ: запас меньше пяти дней, пора утверждать новую партию цитат")
         return 0
 
     finally:

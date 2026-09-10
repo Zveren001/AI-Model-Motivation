@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Вертикальный видеоряд под ролик из бесплатного стока Pexels.
 
-Клип ищется по очередному запросу из списка, скачивается в кэш и не
+Клип ищется по запросу, записанному у цитаты, скачивается в кэш и не
 повторяется раньше чем через месяц. Ключ PEXELS_API_KEY в .env, лимит
 200 запросов в час — при двух роликах в сутки это ничто.
 
@@ -12,7 +12,7 @@
 
 import json
 import os
-import random
+import re
 import sys
 import time
 import urllib.parse
@@ -25,9 +25,13 @@ CACHE = os.path.join(config.ROOT, "footage")
 USED = os.path.join(CACHE, "used.json")
 REUSE_AFTER = 30 * 24 * 3600
 PER_PAGE = 40
-MIN_SECONDS = 8
+MIN_SECONDS = 10
 MAX_SECONDS = 40
 CACHE_LIMIT = 24
+UNWANTED = re.compile(
+    r"\b(smok\w*|cigar\w*|vap(e|ing)|alcohol|beer|wine|whisk\w*|cocktail\w*|champagne|drunk"
+    r"|condoms?|kiss\w*|blood|hospital|clinic|drugs?|pills?|syringe|suffocat\w*|guns?|weapons?"
+    r"|church|pray\w*|bible|mosque|bikini|lingerie|masks?|protest\w*)\b", re.I)
 
 DEFAULT_QUERIES = [
     "calm nature aerial", "rain on window", "ocean waves slow", "forest fog morning",
@@ -104,32 +108,30 @@ def from_cache(used):
     return os.path.join(CACHE, clips[0])
 
 
-def pick_clip(number, min_seconds=MIN_SECONDS, log=print):
-    """Путь к клипу: свежий из стока по очередному запросу, иначе давний из кэша.
+def pick_for_query(query, log=print):
+    """Клип под смысл цитаты: самый подходящий свежий по её запросу, иначе давний из кэша.
 
-    Запрос берётся по счётчику роликов, а не по теме цитаты: под цитату
-    из общей базы точный клип всё равно не подобрать, а по кругу фон
-    хотя бы не повторяется.
+    Берётся первый по релевантности, а не случайный: смысловое совпадение
+    клипа с цитатой важнее разнообразия, повторы и так отсекает fresh().
     """
     os.makedirs(CACHE, exist_ok=True)
     used = load_used()
     key = config.get("PEXELS_API_KEY")
-
     if key:
-        start = number % len(DEFAULT_QUERIES)
-        queries = DEFAULT_QUERIES[start:] + DEFAULT_QUERIES[:start]
-        for query in queries[:6]:
+        for attempt in [query] + DEFAULT_QUERIES[:3]:
             try:
-                videos = search(query, key)
+                videos = search(attempt, key)
             except Exception as e:  # noqa: BLE001
-                log("Pexels не ответил на «%s»: %s" % (query, e))
+                log("Pexels не ответил на «%s»: %s" % (attempt, e))
                 continue
+            # Pexels не отдаёт описание клипа, оно есть только в адресе страницы
             candidates = [v for v in videos
-                          if min_seconds <= v.get("duration", 0) <= MAX_SECONDS
+                          if MIN_SECONDS <= v.get("duration", 0) <= MAX_SECONDS
+                          and not UNWANTED.search(v.get("url", ""))
                           and fresh(v["id"], used) and best_file(v)]
             if not candidates:
                 continue
-            video = random.choice(candidates[:15])
+            video = candidates[0]
             path = os.path.join(CACHE, "%d.mp4" % video["id"])
             if not os.path.exists(path):
                 try:
@@ -140,9 +142,10 @@ def pick_clip(number, min_seconds=MIN_SECONDS, log=print):
             used[str(video["id"])] = time.time()
             save_used(used)
             trim_cache(used)
-            log("Клип %d по запросу «%s», автор %s" % (video["id"], query, video.get("user", {}).get("name", "")))
+            log("Клип %d по запросу «%s», автор %s"
+                % (video["id"], attempt, video.get("user", {}).get("name", "")))
             return path
-        log("Сток не дал свежего клипа, беру из кэша")
+        log("Сток не дал свежего клипа по запросу «%s», беру из кэша" % query)
     else:
         log("PEXELS_API_KEY не задан, беру клип из кэша")
 
@@ -154,8 +157,8 @@ def pick_clip(number, min_seconds=MIN_SECONDS, log=print):
 
 
 def main():
-    number = int(sys.argv[1]) if len(sys.argv) > 1 else 0
-    path = pick_clip(number)
+    query = " ".join(sys.argv[1:]) or DEFAULT_QUERIES[0]
+    path = pick_for_query(query)
     print("клип:", path)
     return 0 if path else 1
 
