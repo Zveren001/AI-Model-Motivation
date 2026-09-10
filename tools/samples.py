@@ -14,6 +14,7 @@ import subprocess
 import sys
 import urllib.parse
 
+import approval
 import compose
 import config
 import footage
@@ -375,6 +376,9 @@ dt{color:#8a8885}dd{margin:0}
 QUEUE_DIR = os.path.join(config.OUTPUT, "queue")
 EXCLUDED = {26: "цитату назвали непонятной"}
 LAST = (21,)
+RUBRIC = {1: "мотивация", 14: "мотивация", 22: "мотивация", 52: "мотивация", 54: "мотивация",
+          11: "совет", 28: "совет", 30: "совет", 35: "совет", 47: "совет", 57: "совет",
+          59: "совет"}
 
 
 def approved_numbers():
@@ -422,6 +426,7 @@ def build_queue():
         with open(os.path.join(OUT, row["file"]), "rb") as src,                 open(os.path.join(QUEUE_DIR, name), "wb") as dst:
             dst.write(src.read())
         items.append({"sample": n, "file": name, "text": row["text"], "topic": row["topic"],
+                      "rubric": RUBRIC.get(n, approval.RUBRICS[0]),
                       "question": row["question"], "effect": row["effect"],
                       "voice": row["voice"], "grade": row["grade"],
                       "text_style": row["text_style"], "clip_id": row["clip_id"],
@@ -429,6 +434,8 @@ def build_queue():
     save_json(os.path.join(QUEUE_DIR, "queue.json"), {"items": items})
     voiced = sum(1 for i in items if i["voice"] != "нет")
     print("В очереди %d роликов: с голосом %d, без голоса %d" % (len(items), voiced, len(items) - voiced))
+    print("По рубрикам: %s" % ", ".join("%s — %d" % (r, sum(1 for i in items if i["rubric"] == r))
+                                       for r in approval.RUBRICS))
     for day in range(0, len(items), 4):
         print("день %2d: %s" % (day // 4 + 1, "  ".join(
             "%02d%s" % (i["sample"], "г" if i["voice"] != "нет" else "т") for i in items[day:day + 4])))

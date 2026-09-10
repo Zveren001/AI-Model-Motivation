@@ -5,6 +5,9 @@
 в папку утверждения таблицей для Excel; после отметок «да/нет» таблица
 загружается обратно, и одобренные цитаты переходят в quotes/approved.json —
 только оттуда автопост берёт цитаты для новых роликов.
+
+У каждой фразы рубрика — цитата, мотивация или совет: автопост чередует
+их по кругу, а в таблице рубрику видно и её можно поменять.
 """
 
 import csv
@@ -18,7 +21,8 @@ import config
 CANDIDATES = os.path.join(config.ROOT, "quotes", "candidates.json")
 APPROVED = os.path.join(config.ROOT, "quotes", "approved.json")
 OUT = config.get("SAMPLES_DIR", r"C:\Users\Zveren001\Desktop\MotivationReference")
-COLUMNS = ["№", "Цитата", "Тема", "Видеоряд", "Вопрос первым комментарием",
+RUBRICS = ("цитата", "мотивация", "совет")
+COLUMNS = ["№", "Цитата", "Рубрика", "Тема", "Видеоряд", "Вопрос первым комментарием",
            "Утверждаю (да/нет)", "Комментарий"]
 
 
@@ -35,6 +39,11 @@ def save(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def rubric_of(item):
+    """Рубрика фразы; у записей без неё — цитата."""
+    return item.get("rubric") or RUBRICS[0]
+
+
 def table_path(batch):
     return os.path.join(OUT, "Цитаты — партия %d.csv" % batch)
 
@@ -46,7 +55,8 @@ def export(batch):
         writer = csv.writer(f, delimiter=";")
         writer.writerow(COLUMNS)
         for q in rows:
-            writer.writerow([q["id"], q["text"], q["topic"], q["scene"], q["question"], "", ""])
+            writer.writerow([q["id"], q["text"], rubric_of(q), q["topic"], q["scene"],
+                             q["question"], "", ""])
     print("Выгружено %d цитат: %s" % (len(rows), table_path(batch)))
 
 
@@ -71,6 +81,12 @@ def import_marks(batch):
                 continue
             quote["text"] = row.get("Цитата", quote["text"]).strip() or quote["text"]
             quote["question"] = row.get("Вопрос первым комментарием", "").strip() or quote["question"]
+            rubric = (row.get("Рубрика") or "").strip().lower()
+            if rubric in RUBRICS:
+                quote["rubric"] = rubric
+            elif rubric:
+                print("%s: рубрика «%s» не распознана, оставлена «%s»"
+                      % (number, rubric, rubric_of(quote)))
             if add_quotes.normalize(quote["text"]) in known:
                 continue
             approved["quotes"].append(quote)

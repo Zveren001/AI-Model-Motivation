@@ -3,7 +3,7 @@
 
 Раз в сутки по cron: просмотры, лайки и комментарии из Data API, вовлечённые
 просмотры, досмотр и подписки из Analytics API. Сводка сравнивает по ним
-эффекты, обработку фона, голос и подачу текста.
+рубрики, эффекты, обработку фона, голос и подачу текста.
 
 Метрику «выбрали просмотр» из Студии API не отдаёт, её заменяет доля
 вовлечённых просмотров (engagedViews) от всех. Аналитика отстаёт на два-три
@@ -217,7 +217,7 @@ def summary(stats):
     print("%-11s %6s %6s %6s %6s %5s %5s %5s  %-13s %s"
           % ("выход", "просм", "сутки", "вовл%", "досм%", "лайк", "комм", "подп",
              "тема", "цитата"))
-    groups = {"effect": {}, "grade": {}, "voice": {}, "text_style": {}, "topic": {}}
+    groups = {"rubric": {}, "effect": {}, "grade": {}, "voice": {}, "text_style": {}, "topic": {}}
     for video_id, video in sorted(stats.get("videos", {}).items(),
                                   key=lambda kv: kv[1].get("published", "")):
         post = posts.get(video_id, {})
@@ -239,8 +239,8 @@ def summary(stats):
             if value is not None:
                 groups[field].setdefault(value, []).append(score)
 
-    for field, label in (("effect", "Эффект"), ("grade", "Фон"), ("voice", "Голос"),
-                         ("text_style", "Подача текста"), ("topic", "Тема")):
+    for field, label in (("rubric", "Рубрика"), ("effect", "Эффект"), ("grade", "Фон"),
+                         ("voice", "Голос"), ("text_style", "Подача текста"), ("topic", "Тема")):
         if not groups[field]:
             continue
         print()

@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """Автопубликация по расписанию: один запуск — один ролик на YouTube и в Instagram.
 
-Сначала выходят готовые утверждённые ролики из очереди queue/ — их человек
-посмотрел и одобрил целиком. Когда очередь кончается, ролик собирается
-движком compose из цитаты, одобренной в таблице (quotes/approved.json):
-других цитат автопост не берёт, и если утверждённых не осталось, слот
-пропускается. Эффект, обработка фона, подача текста и голос идут по кругу
+Рубрики — цитата, мотивация, совет — идут по кругу. В слот выходит готовый
+утверждённый ролик нужной рубрики из очереди queue/ — их человек посмотрел
+и одобрил целиком; если в очереди такого нет, ролик собирается движком
+compose из фразы этой рубрики, одобренной в таблице (quotes/approved.json).
+Кончилась рубрика — берётся следующая, других фраз автопост не берёт, и если
+утверждённых не осталось совсем, слот пропускается.
+Эффект, обработка фона, подача текста и голос идут по кругу
 только среди одобренных вариантов; голос звучит в двух слотах из четырёх,
 и какие это слоты, меняется по дням, чтобы голос не срастался со временем.
 
@@ -34,6 +36,7 @@ import time
 import urllib.error
 
 import add_quotes
+import approval
 import compose
 import config
 import footage
@@ -59,13 +62,16 @@ NET_DELAY = 20
 JITTER_MIN = 15 * 60
 JITTER_MAX = 30 * 60
 
-CAPTION_TAGS = "#мотивация #цитаты #мысли #саморазвитие"
+RUBRICS = approval.RUBRICS
+RUBRIC_TAGS = {"цитата": "#цитаты", "мотивация": "#мотивация", "совет": "#советы"}
+CAPTION_TAGS = ["#мотивация", "#мысли", "#саморазвитие"]
 
 # Вертикальное видео короче трёх минут YouTube сам относит к Shorts,
 # хэштег в описании только помогает ему определиться быстрее
-YOUTUBE_TAGS = "#shorts #мотивация #цитаты"
-YOUTUBE_KEYWORDS = ["мотивация", "цитаты", "саморазвитие", "мысли", "shorts"]
+YOUTUBE_TAGS = ["#shorts", "#мотивация"]
+YOUTUBE_KEYWORDS = ["мотивация", "саморазвитие", "мысли", "shorts"]
 FOOTAGE_CREDIT = "Видеоряд: pexels.com"
+LOW_STOCK = 7
 
 # Только варианты, одобренные на утверждении образцов 10.09.2026
 EFFECTS = typefx.ORDER
@@ -183,27 +189,75 @@ def recent_topics(journal):
     return {p.get("topic") for p in ordered[-TOPIC_COOLDOWN:] if p.get("topic")}
 
 
-def next_queue_item(journal):
-    """Первый готовый ролик очереди, который ещё не выходил."""
+def next_rubric(journal):
+    """Рубрика следующего ролика: цитата, мотивация и совет идут по кругу от последней вышедшей."""
+    ordered = sorted(reels(journal), key=lambda p: p.get("at", ""))
+    last = next((p["rubric"] for p in reversed(ordered) if p.get("rubric") in RUBRICS), None)
+    return RUBRICS[(RUBRICS.index(last) + 1) % len(RUBRICS)] if last else RUBRICS[0]
+
+
+def queue_items(journal, rubric):
+    """Готовые ролики рубрики, которые ещё не выходили, в порядке очереди."""
     queue = load_json(os.path.join(QUEUE_DIR, "queue.json"), {"items": []})
     done = {p.get("sample") for p in reels(journal)} - {None}
     texts = published_texts(journal)
-    for item in queue["items"]:
-        if item["sample"] in done or add_quotes.normalize(item["text"]) in texts:
-            continue
+    return [i for i in queue["items"]
+            if approval.rubric_of(i) == rubric and i["sample"] not in done
+            and add_quotes.normalize(i["text"]) not in texts]
+
+
+def next_queue_item(journal, rubric):
+    """Первый готовый ролик рубрики, который не повторяет тему соседей."""
+    items = []
+    for item in queue_items(journal, rubric):
         if os.path.exists(os.path.join(QUEUE_DIR, item["file"])):
-            return item
-        log("В очереди нет файла %s, пропускаю" % item["file"])
-    return None
+            items.append(item)
+        else:
+            log("В очереди нет файла %s, пропускаю" % item["file"])
+    skip = recent_topics(journal)
+    return next((i for i in items if i["topic"] not in skip), items[0] if items else None)
 
 
-def next_approved_quote(journal):
-    """Первая утверждённая цитата, которая ещё не выходила и не повторяет тему соседей."""
+def approved_quotes(journal, rubric):
+    """Утверждённые фразы рубрики, которые ещё не выходили."""
     texts = published_texts(journal)
-    fresh = [q for q in load_json(APPROVED, {"quotes": []})["quotes"]
-             if add_quotes.normalize(q["text"]) not in texts]
+    return [q for q in load_json(APPROVED, {"quotes": []})["quotes"]
+            if approval.rubric_of(q) == rubric and add_quotes.normalize(q["text"]) not in texts]
+
+
+def next_approved_quote(journal, rubric):
+    """Первая утверждённая фраза рубрики, которая не повторяет тему соседей."""
+    fresh = approved_quotes(journal, rubric)
     skip = recent_topics(journal)
     return next((q for q in fresh if q["topic"] not in skip), fresh[0] if fresh else None)
+
+
+def choose(journal, engine_only=False):
+    """Рубрика и материал для слота: готовый ролик очереди или утверждённая фраза.
+
+    Если очередная рубрика кончилась, берётся следующая по кругу: пропущенный
+    слот хуже нарушенного чередования.
+    """
+    first = RUBRICS.index(next_rubric(journal))
+    order = RUBRICS[first:] + RUBRICS[:first]
+    for rubric in order:
+        item = None if engine_only else next_queue_item(journal, rubric)
+        quote = None if item else next_approved_quote(journal, rubric)
+        if item or quote:
+            if rubric != order[0]:
+                log("Рубрика «%s» закончилась, выходит «%s»" % (order[0], rubric))
+            return rubric, item, quote
+    return None, None, None
+
+
+def log_stock(journal):
+    """Запас по рубрикам и предупреждение, когда какой-то осталось меньше чем на пять дней."""
+    left = {r: len(queue_items(journal, r)) + len(approved_quotes(journal, r)) for r in RUBRICS}
+    log("Запас: %s" % ", ".join("%s — %d" % kv for kv in left.items()))
+    low = [r for r, n in left.items() if n < LOW_STOCK]
+    if low:
+        log("ВНИМАНИЕ: меньше чем на пять дней осталось: %s — пора утверждать новую партию"
+            % ", ".join(low))
 
 
 def voiced_slot(now, slot):
@@ -228,18 +282,23 @@ def engine_variant(journal, now, slot):
             "text_style": "крупно" if n % 3 == 2 else "тень", "voice": voice}
 
 
-def caption_for(text):
-    return "%s\n\n%s" % (text, CAPTION_TAGS)
+def unique(items):
+    return list(dict.fromkeys(items))
+
+
+def caption_for(text, rubric):
+    return "%s\n\n%s" % (text, " ".join(unique([RUBRIC_TAGS[rubric]] + CAPTION_TAGS)))
 
 
 def topic_tag(topic):
     return "#" + re.sub(r"[^\w]", "", topic)
 
 
-def youtube_meta(text, topic):
+def youtube_meta(text, topic, rubric):
     """Заголовок, описание и ключевые слова ролика для YouTube."""
-    description = "\n\n".join([text, FOOTAGE_CREDIT, "%s %s" % (YOUTUBE_TAGS, topic_tag(topic))])
-    return text[:100], description, YOUTUBE_KEYWORDS + [topic]
+    tags = unique(YOUTUBE_TAGS[:1] + [RUBRIC_TAGS[rubric]] + YOUTUBE_TAGS[1:] + [topic_tag(topic)])
+    description = "\n\n".join([text, FOOTAGE_CREDIT, " ".join(tags)])
+    return text[:100], description, unique(YOUTUBE_KEYWORDS + [RUBRIC_TAGS[rubric][1:], topic])
 
 
 def publish_reel(url, caption, attempts=48):
@@ -295,20 +354,21 @@ def error_text(e):
 
 def prepare(journal, now, slot, day, force, engine_only):
     """Ролик для слота: готовый из очереди или собранный движком. None — публиковать нечего."""
-    item = None if engine_only else next_queue_item(journal)
+    rubric, item, quote = choose(journal, engine_only)
     if item:
         path = os.path.join(QUEUE_DIR, item["file"])
-        log("Готовый ролик из очереди, образец №%02d: %s" % (item["sample"], item["text"]))
-        return dict(item, path=path, source="queue", quote_id=None, clip=item["clip_id"])
+        log("Готовый ролик из очереди, рубрика «%s», образец №%02d: %s"
+            % (rubric, item["sample"], item["text"]))
+        return dict(item, path=path, source="queue", quote_id=None, clip=item["clip_id"],
+                    rubric=rubric)
 
-    quote = next_approved_quote(journal)
     if not quote:
-        log("Утверждённые цитаты закончились — слот пропущен, нужна новая партия")
+        log("Утверждённые фразы закончились — слот пропущен, нужна новая партия")
         return None
     variant = engine_variant(journal, now, slot)
     variant.update({k: v for k, v in force.items() if v})
-    log("Сборка по утверждённой цитате #%d «%s»: эффект %s, фон %s, текст %s, голос %s"
-        % (quote["id"], quote["text"], variant["effect"], variant["grade"],
+    log("Сборка по утверждённой фразе #%d, рубрика «%s», «%s»: эффект %s, фон %s, текст %s, голос %s"
+        % (quote["id"], rubric, quote["text"], variant["effect"], variant["grade"],
            variant["text_style"], variant["voice"]))
     clip = footage.pick_for_query(quote["query"], log=log)
     if not clip:
@@ -320,7 +380,7 @@ def prepare(journal, now, slot, day, force, engine_only):
     log("Ролик собран: %.1f с" % duration)
     return dict(variant, path=path, source="engine", sample=None, quote_id=quote["id"],
                 text=quote["text"], topic=quote["topic"], question=quote["question"],
-                clip=os.path.basename(clip)[:-4], duration=duration)
+                clip=os.path.basename(clip)[:-4], duration=duration, rubric=rubric)
 
 
 def main():
@@ -361,6 +421,7 @@ def main():
             return 1
 
         if dry:
+            log_stock(journal)
             log("Проверка завершена, ничего не отправлено")
             if post["source"] == "engine":
                 drop_local(post["path"])
@@ -380,7 +441,7 @@ def main():
         log("Загружено: %s" % media_url)
 
         try:
-            media_id = publish_reel(media_url, caption_for(post["text"]))
+            media_id = publish_reel(media_url, caption_for(post["text"], post["rubric"]))
         except (urllib.error.HTTPError, RuntimeError, KeyError) as e:
             log("ОШИБКА публикации в Instagram: %s" % error_text(e))
             if post["source"] == "engine":
@@ -397,7 +458,7 @@ def main():
 
         youtube_id, yt_comment = None, None
         if youtube_publish.configured():
-            title, description, keywords = youtube_meta(post["text"], post["topic"])
+            title, description, keywords = youtube_meta(post["text"], post["topic"], post["rubric"])
             try:
                 youtube_id, privacy = youtube_publish.publish(
                     post["path"], title, description, tags=keywords)
@@ -410,7 +471,8 @@ def main():
 
         journal.setdefault("posts", {})["%s_%02d" % (day, slot)] = {
             "kind": "reel", "source": post["source"], "sample": post.get("sample"),
-            "quote_id": post.get("quote_id"), "text": post["text"], "topic": post["topic"],
+            "quote_id": post.get("quote_id"), "rubric": post["rubric"],
+            "text": post["text"], "topic": post["topic"],
             "question": post["question"], "effect": post["effect"], "grade": post["grade"],
             "text_style": post["text_style"], "voice": post["voice"], "clip": post["clip"],
             "duration": post["duration"], "media_id": media_id, "ig_comment": ig_comment,
@@ -423,15 +485,8 @@ def main():
         if post["source"] == "engine":
             drop_local(post["path"])
 
-        texts = published_texts(journal)
-        queue = load_json(os.path.join(QUEUE_DIR, "queue.json"), {"items": []})["items"]
-        queue_left = sum(1 for i in queue if add_quotes.normalize(i["text"]) not in texts)
-        approved_left = sum(1 for q in load_json(APPROVED, {"quotes": []})["quotes"]
-                            if add_quotes.normalize(q["text"]) not in texts)
-        log("Опубликовано. Готовых роликов в очереди: %d, утверждённых цитат: %d"
-            % (queue_left, approved_left))
-        if queue_left + approved_left < 20:
-            log("ВНИМАНИЕ: запас меньше пяти дней, пора утверждать новую партию цитат")
+        log("Опубликовано")
+        log_stock(journal)
         return 0
 
     finally:
