@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 """Автопубликация по расписанию: один запуск — один ролик на YouTube и в Instagram.
 
-Рубрики — цитата, мотивация, совет — идут по кругу. В слот выходит готовый
-утверждённый ролик нужной рубрики из очереди queue/ — их человек посмотрел
-и одобрил целиком; если в очереди такого нет, ролик собирается движком
-compose из фразы этой рубрики, одобренной в таблице (quotes/approved.json).
-Кончилась рубрика — берётся следующая, других фраз автопост не берёт, и если
-утверждённых не осталось совсем, слот пропускается.
+Фразы выходят строго по единому списку quotes/quotes.json — порядок, рубрики
+и темы в нём уже расставлены (quotes_list.py). В слот идёт первая невышедшая
+фраза: если к ней есть готовый ролик из queue/, публикуется он, иначе ролик
+собирает движок compose. Кончился список — слот пропускается.
 Эффект, обработка фона, подача текста и голос идут по кругу
 только среди одобренных вариантов; голос звучит в двух слотах из четырёх,
 и какие это слоты, меняется по дням, чтобы голос не срастался со временем.
@@ -21,8 +19,8 @@ compose из фразы этой рубрики, одобренной в таб�
 Защита от повторов трёхуровневая, потому что cron может сработать
 дважды при перезапуске сервера или сдвиге времени:
 1. Журнал post_log.json — какой слот какого дня отработан и какие ролики
-   и цитаты уже вышли.
-2. Сверка текста цитаты с журналом — одна мысль не выходит дважды.
+   и фразы уже вышли.
+2. Сверка номера и текста фразы с журналом — одна мысль не выходит дважды.
 3. Файл блокировки — от двух одновременных запусков.
 """
 
@@ -36,12 +34,12 @@ import time
 import urllib.error
 
 import add_quotes
-import approval
 import compose
 import config
 import footage
 import github_upload
 import meta_net
+import quotes_list
 import typefx
 import youtube_publish
 
@@ -51,7 +49,6 @@ LOG_PATH = os.path.join(config.ROOT, "post_log.json")
 LOCK_PATH = os.path.join(config.ROOT, ".autopost.lock")
 RUN_LOG = os.path.join(config.ROOT, "autopost.log")
 QUEUE_DIR = os.path.join(config.ROOT, "queue")
-APPROVED = os.path.join(config.ROOT, "quotes", "approved.json")
 
 # Блокировка переживает разброс времени вместе со сборкой ролика: полчаса сна,
 # озвучка, скачивание клипа и кодирование легко перекрывают прежние пятнадцать минут.
@@ -62,7 +59,6 @@ NET_DELAY = 20
 JITTER_MIN = 15 * 60
 JITTER_MAX = 30 * 60
 
-RUBRICS = approval.RUBRICS
 RUBRIC_TAGS = {"цитата": "#цитаты", "мотивация": "#мотивация", "совет": "#советы"}
 CAPTION_TAGS = ["#мотивация", "#мысли", "#саморазвитие"]
 
@@ -71,13 +67,12 @@ CAPTION_TAGS = ["#мотивация", "#мысли", "#саморазвитие
 YOUTUBE_TAGS = ["#shorts", "#мотивация"]
 YOUTUBE_KEYWORDS = ["мотивация", "саморазвитие", "мысли", "shorts"]
 FOOTAGE_CREDIT = "Видеоряд: pexels.com"
-LOW_STOCK = 7
+LOW_STOCK_DAYS = 14
 
 # Только варианты, одобренные на утверждении образцов 10.09.2026
 EFFECTS = typefx.ORDER
 GRADES = ("dark", "blur", "bw", "warm", "zoom")
 VOICES = ("обычный", "медленный", "бодрый", "с акцентом", "низкий")
-TOPIC_COOLDOWN = 2
 
 # Расписание задано по Москве, а сервер живёт по UTC. Брать datetime.now()
 # нельзя: в 06:00 МСК скрипт увидел бы 03:00 и решил, что слот не наступил.
@@ -184,80 +179,23 @@ def published_texts(journal):
     return {add_quotes.normalize(p["text"]) for p in reels(journal) if p.get("text")}
 
 
-def recent_topics(journal):
-    ordered = sorted(reels(journal), key=lambda p: p.get("at", ""))
-    return {p.get("topic") for p in ordered[-TOPIC_COOLDOWN:] if p.get("topic")}
-
-
-def next_rubric(journal):
-    """Рубрика следующего ролика: цитата, мотивация и совет идут по кругу от последней вышедшей."""
-    ordered = sorted(reels(journal), key=lambda p: p.get("at", ""))
-    last = next((p["rubric"] for p in reversed(ordered) if p.get("rubric") in RUBRICS), None)
-    return RUBRICS[(RUBRICS.index(last) + 1) % len(RUBRICS)] if last else RUBRICS[0]
-
-
-def queue_items(journal, rubric):
-    """Готовые ролики рубрики, которые ещё не выходили, в порядке очереди."""
-    queue = load_json(os.path.join(QUEUE_DIR, "queue.json"), {"items": []})
-    done = {p.get("sample") for p in reels(journal)} - {None}
+def remaining(journal):
+    """Фразы списка, которые ещё не выходили роликом, в порядке выхода."""
+    posts = reels(journal)
+    ids = {p.get("quote_id") for p in posts} - {None}
     texts = published_texts(journal)
-    return [i for i in queue["items"]
-            if approval.rubric_of(i) == rubric and i["sample"] not in done
-            and add_quotes.normalize(i["text"]) not in texts]
-
-
-def next_queue_item(journal, rubric):
-    """Первый готовый ролик рубрики, который не повторяет тему соседей."""
-    items = []
-    for item in queue_items(journal, rubric):
-        if os.path.exists(os.path.join(QUEUE_DIR, item["file"])):
-            items.append(item)
-        else:
-            log("В очереди нет файла %s, пропускаю" % item["file"])
-    skip = recent_topics(journal)
-    return next((i for i in items if i["topic"] not in skip), items[0] if items else None)
-
-
-def approved_quotes(journal, rubric):
-    """Утверждённые фразы рубрики, которые ещё не выходили."""
-    texts = published_texts(journal)
-    return [q for q in load_json(APPROVED, {"quotes": []})["quotes"]
-            if approval.rubric_of(q) == rubric and add_quotes.normalize(q["text"]) not in texts]
-
-
-def next_approved_quote(journal, rubric):
-    """Первая утверждённая фраза рубрики, которая не повторяет тему соседей."""
-    fresh = approved_quotes(journal, rubric)
-    skip = recent_topics(journal)
-    return next((q for q in fresh if q["topic"] not in skip), fresh[0] if fresh else None)
-
-
-def choose(journal, engine_only=False):
-    """Рубрика и материал для слота: готовый ролик очереди или утверждённая фраза.
-
-    Если очередная рубрика кончилась, берётся следующая по кругу: пропущенный
-    слот хуже нарушенного чередования.
-    """
-    first = RUBRICS.index(next_rubric(journal))
-    order = RUBRICS[first:] + RUBRICS[:first]
-    for rubric in order:
-        item = None if engine_only else next_queue_item(journal, rubric)
-        quote = None if item else next_approved_quote(journal, rubric)
-        if item or quote:
-            if rubric != order[0]:
-                log("Рубрика «%s» закончилась, выходит «%s»" % (order[0], rubric))
-            return rubric, item, quote
-    return None, None, None
+    return [q for q in quotes_list.planned(quotes_list.load())
+            if q["id"] not in ids and add_quotes.normalize(q["text"]) not in texts]
 
 
 def log_stock(journal):
-    """Запас по рубрикам и предупреждение, когда какой-то осталось меньше чем на пять дней."""
-    left = {r: len(queue_items(journal, r)) + len(approved_quotes(journal, r)) for r in RUBRICS}
-    log("Запас: %s" % ", ".join("%s — %d" % kv for kv in left.items()))
-    low = [r for r, n in left.items() if n < LOW_STOCK]
-    if low:
-        log("ВНИМАНИЕ: меньше чем на пять дней осталось: %s — пора утверждать новую партию"
-            % ", ".join(low))
+    """Сколько фраз осталось в списке и на сколько дней их хватит."""
+    left = remaining(journal)
+    days = len(left) // len(slots())
+    log("В списке осталось %d фраз, на %d дней: %s" % (len(left), days, ", ".join(
+        "%s — %d" % (r, sum(1 for q in left if q["rubric"] == r)) for r in quotes_list.RUBRICS)))
+    if days < LOW_STOCK_DAYS:
+        log("ВНИМАНИЕ: фраз осталось меньше чем на %d дней" % LOW_STOCK_DAYS)
 
 
 def voiced_slot(now, slot):
@@ -353,22 +291,27 @@ def error_text(e):
 
 
 def prepare(journal, now, slot, day, force, engine_only):
-    """Ролик для слота: готовый из очереди или собранный движком. None — публиковать нечего."""
-    rubric, item, quote = choose(journal, engine_only)
-    if item:
-        path = os.path.join(QUEUE_DIR, item["file"])
-        log("Готовый ролик из очереди, рубрика «%s», образец №%02d: %s"
-            % (rubric, item["sample"], item["text"]))
-        return dict(item, path=path, source="queue", quote_id=None, clip=item["clip_id"],
-                    rubric=rubric)
-
-    if not quote:
-        log("Утверждённые фразы закончились — слот пропущен, нужна новая партия")
+    """Ролик для слота: готовый или собранный движком по следующей фразе списка. None — публиковать нечего."""
+    left = remaining(journal)
+    if not left:
+        log("Фразы в списке закончились — слот пропущен")
         return None
+    quote = left[0]
+    phrase = {"quote_id": quote["id"], "text": quote["text"], "topic": quote["topic"],
+              "question": quote["question"], "rubric": quote["rubric"]}
+    video = quote.get("video")
+    if video and not engine_only:
+        path = os.path.join(QUEUE_DIR, video["file"])
+        if os.path.exists(path):
+            log("Готовый ролик, фраза #%d, рубрика «%s», образец №%02d: %s"
+                % (quote["id"], quote["rubric"], video["sample"], quote["text"]))
+            return dict(video, **phrase, path=path, source="queue", clip=video["clip_id"])
+        log("Нет файла готового ролика %s — собираю движком" % video["file"])
+
     variant = engine_variant(journal, now, slot)
     variant.update({k: v for k, v in force.items() if v})
-    log("Сборка по утверждённой фразе #%d, рубрика «%s», «%s»: эффект %s, фон %s, текст %s, голос %s"
-        % (quote["id"], rubric, quote["text"], variant["effect"], variant["grade"],
+    log("Сборка по фразе #%d, рубрика «%s», «%s»: эффект %s, фон %s, текст %s, голос %s"
+        % (quote["id"], quote["rubric"], quote["text"], variant["effect"], variant["grade"],
            variant["text_style"], variant["voice"]))
     clip = footage.pick_for_query(quote["query"], log=log)
     if not clip:
@@ -378,9 +321,8 @@ def prepare(journal, now, slot, day, force, engine_only):
     duration = compose.render(quote["text"], path, clip, variant["effect"], variant["grade"],
                               variant["text_style"], variant["voice"], seed=quote["id"])
     log("Ролик собран: %.1f с" % duration)
-    return dict(variant, path=path, source="engine", sample=None, quote_id=quote["id"],
-                text=quote["text"], topic=quote["topic"], question=quote["question"],
-                clip=os.path.basename(clip)[:-4], duration=duration, rubric=rubric)
+    return dict(variant, **phrase, path=path, source="engine", sample=None,
+                clip=os.path.basename(clip)[:-4], duration=duration)
 
 
 def main():

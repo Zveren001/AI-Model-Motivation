@@ -14,10 +14,10 @@ import subprocess
 import sys
 import urllib.parse
 
-import approval
 import compose
 import config
 import footage
+import quotes_list
 import typefx
 
 OUT = config.get("SAMPLES_DIR", r"C:\Users\Zveren001\Desktop\MotivationReference")
@@ -375,10 +375,6 @@ dt{color:#8a8885}dd{margin:0}
 
 QUEUE_DIR = os.path.join(config.OUTPUT, "queue")
 EXCLUDED = {26: "цитату назвали непонятной"}
-LAST = (21,)
-RUBRIC = {1: "мотивация", 14: "мотивация", 22: "мотивация", 52: "мотивация", 54: "мотивация",
-          11: "совет", 28: "совет", 30: "совет", 35: "совет", 47: "совет", 57: "совет",
-          59: "совет"}
 
 
 def approved_numbers():
@@ -391,54 +387,28 @@ def approved_numbers():
     return sorted(n for n, v in marks.items() if v.startswith("да") and n not in EXCLUDED)
 
 
-def queue_order(manifest, numbers):
-    """Порядок выпуска: голос и тишина вперемешку, эффект и тема не повторяются подряд."""
-    pool = {"voice": [n for n in numbers if manifest[str(n)]["voice"] != "нет" and n not in LAST],
-            "silent": [n for n in numbers if manifest[str(n)]["voice"] == "нет" and n not in LAST]}
-    silent, total = len(pool["silent"]), len(pool["voice"]) + len(pool["silent"])
-    order = []
-    for i in range(total):
-        kind = "silent" if (i + 1) * silent // total > i * silent // total else "voice"
-        if not pool[kind]:
-            kind = "voice" if kind == "silent" else "silent"
-        recent = [manifest[str(n)] for n in order[-2:]]
-        fits = [n for n in pool[kind]
-                if not recent or (manifest[str(n)]["effect"] != recent[-1]["effect"]
-                                  and manifest[str(n)]["topic"] not in {r["topic"] for r in recent})]
-        chosen = (fits or pool[kind])[0]
-        pool[kind].remove(chosen)
-        order.append(chosen)
-    return order + [n for n in LAST if n in numbers]
-
-
 def build_queue():
-    """Готовые утверждённые ролики в порядке выпуска: файлы и queue.json для сервера."""
+    """Готовые одобренные ролики: файлы для сервера и привязка к фразам единого списка."""
     manifest = load_json(MANIFEST, {})
-    order = queue_order(manifest, approved_numbers())
     if os.path.isdir(QUEUE_DIR):
         for name in os.listdir(QUEUE_DIR):
             os.remove(os.path.join(QUEUE_DIR, name))
     os.makedirs(QUEUE_DIR, exist_ok=True)
-    items = []
-    for n in order:
+    videos = []
+    for n in approved_numbers():
         row = manifest[str(n)]
         name = "%02d.mp4" % n
-        with open(os.path.join(OUT, row["file"]), "rb") as src,                 open(os.path.join(QUEUE_DIR, name), "wb") as dst:
+        with open(os.path.join(OUT, row["file"]), "rb") as src, \
+                open(os.path.join(QUEUE_DIR, name), "wb") as dst:
             dst.write(src.read())
-        items.append({"sample": n, "file": name, "text": row["text"], "topic": row["topic"],
-                      "rubric": RUBRIC.get(n, approval.RUBRICS[0]),
-                      "question": row["question"], "effect": row["effect"],
-                      "voice": row["voice"], "grade": row["grade"],
-                      "text_style": row["text_style"], "clip_id": row["clip_id"],
-                      "duration": row["duration"]})
-    save_json(os.path.join(QUEUE_DIR, "queue.json"), {"items": items})
-    voiced = sum(1 for i in items if i["voice"] != "нет")
-    print("В очереди %d роликов: с голосом %d, без голоса %d" % (len(items), voiced, len(items) - voiced))
-    print("По рубрикам: %s" % ", ".join("%s — %d" % (r, sum(1 for i in items if i["rubric"] == r))
-                                       for r in approval.RUBRICS))
-    for day in range(0, len(items), 4):
-        print("день %2d: %s" % (day // 4 + 1, "  ".join(
-            "%02d%s" % (i["sample"], "г" if i["voice"] != "нет" else "т") for i in items[day:day + 4])))
+        videos.append({"sample": n, "file": name, "text": row["text"], "effect": row["effect"],
+                       "voice": row["voice"], "grade": row["grade"],
+                       "text_style": row["text_style"], "clip_id": row["clip_id"],
+                       "duration": row["duration"]})
+    missing = quotes_list.attach_videos(videos)
+    print("Готовых роликов: %d, привязано к фразам списка: %d" % (len(videos), len(videos) - len(missing)))
+    for video in missing:
+        print("   в списке нет фразы образца №%02d: %s" % (video["sample"], video["text"]))
 
 
 def parse_numbers(arg):
