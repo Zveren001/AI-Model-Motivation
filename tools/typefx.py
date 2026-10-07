@@ -38,7 +38,10 @@ NAMES = {
     "slova_padayut": "слова падают",
     "pechat_s_podsvetkoj": "печать с ореолом",
     "slova_vspyshkoj": "слова вспышкой",
+    "fraza_tselikom": "фраза целиком",
 }
+TEST = "fraza_tselikom"
+DIM = 135
 
 _fonts = {}
 
@@ -319,6 +322,23 @@ def eff_type_glow(layout, timeline, t, frame):
     typed(layout, timeline, t, ImageDraw.Draw(frame), cursor=t < start)
 
 
+def eff_whole_phrase(layout, timeline, t, frame):
+    """Вся фраза видна с первого кадра: прозвучавшее белым, остальное приглушено, текущее слово с ореолом."""
+    draw = ImageDraw.Draw(frame)
+    for (x, y, word, _), s, e in zip(layout.slots, timeline.starts, timeline.ends):
+        draw.text((x, y), word, font=layout.font, fill=TEXT + (255 if t >= s else DIM,))
+        if not s <= t < e + 0.15:
+            continue
+        pad = layout.font.size
+        box = (int(x - pad), int(y - pad), int(x + layout.width_of(word) + pad), int(y + pad * 2.4))
+        glow = Image.new("RGBA", (box[2] - box[0], box[3] - box[1]), (0, 0, 0, 0))
+        ink = GLOW + (150,)
+        ImageDraw.Draw(glow).text((pad, pad), word, font=layout.font, fill=ink,
+                                  stroke_width=max(4, layout.font.size // 12), stroke_fill=ink)
+        frame.alpha_composite(glow.filter(ImageFilter.GaussianBlur(14)), (box[0], box[1]))
+        draw.text((x, y), word, font=layout.font, fill=TEXT + (255,))
+
+
 def eff_scale_pop(layout, timeline, t, frame):
     """Слова вспыхивают крупнее и садятся в размер."""
     draw = ImageDraw.Draw(frame)
@@ -344,8 +364,11 @@ EFFECTS = {
     "slova_padayut": eff_drop_words,
     "pechat_s_podsvetkoj": eff_type_glow,
     "slova_vspyshkoj": eff_scale_pop,
+    "fraza_tselikom": eff_whole_phrase,
 }
-ORDER = tuple(EFFECTS)
+
+# Утверждённые девять идут по кругу; проверочный вариант выдаётся автопостом отдельно
+ORDER = tuple(k for k in EFFECTS if k != TEST)
 
 
 def frame_at(effect, layout, timeline, t):

@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Озвучка текста голосом Светланы через edge-tts с таймингами слов.
+"""Озвучка текста с таймингами слов: Silero на сервере или edge-tts как запасной.
 
-Microsoft запрещает в edge-tts собственную SSML-разметку, поэтому тег паузы
-не работает, а сплошной синтез проглатывает запятые и тире. Текст режется
-на фразы по знакам препинания, каждая озвучивается отдельно и склеивается
-с тишиной нужной длины — так паузу задаём мы, а не сервис.
+Движок выбирается ключом VOICE_ENGINE в .env, подача голоса приходит из
+compose.VOICES. Silero живёт в отдельном окружении — см. tts_silero.
+
+Оба движка озвучивают текст по фразам: Microsoft запрещает в edge-tts
+собственную SSML-разметку, поэтому тег паузы не работает, а сплошной синтез
+проглатывает запятые и тире. Текст режется на фразы по знакам препинания,
+каждая озвучивается отдельно и склеивается с тишиной нужной длины — так паузу
+задаём мы, а не сервис.
 """
 
 import asyncio
@@ -18,6 +22,7 @@ import edge_tts
 
 import config
 
+ENGINE = config.get("VOICE_ENGINE", "edge")
 VOICE = config.get("VOICE", "ru-RU-SvetlanaNeural")
 RATE = config.get("VOICE_RATE", "+0%")
 PITCH = config.get("VOICE_PITCH", "+0Hz")
@@ -117,6 +122,21 @@ def speak_phrases(text, out_path, rate=None, pitch=None, pause_scale=1.0, final_
         f.setframerate(SAMPLE_RATE)
         f.writeframes(b"".join(chunks))
     return words
+
+
+def synthesize(text, out_path, preset, log=print):
+    """Озвучка по описанию подачи; если Silero недоступен, ролик озвучивает edge-tts."""
+    if ENGINE == "silero" and preset.get("speaker"):
+        import tts_silero  # локальный импорт: модуль нужен только при включённом Silero
+        try:
+            return tts_silero.speak_phrases(text, out_path, preset["speaker"],
+                                            preset.get("rate", "medium"),
+                                            preset.get("pause_scale", 1.0),
+                                            preset.get("final_pause", 0.0))
+        except Exception as e:  # noqa: BLE001
+            log("Silero не отработал (%s), озвучиваю прежним голосом" % e)
+    return speak_phrases(text, out_path, preset.get("edge_rate"), preset.get("edge_pitch"),
+                         preset.get("pause_scale", 1.0), preset.get("final_pause", 0.0))
 
 
 async def _speak_whole(text, out_path):

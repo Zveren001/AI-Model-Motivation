@@ -106,7 +106,7 @@ python quotes_list.py --order    пересобрать порядок выхо�
 
 ```
 cd tools
-python compose.py "Цитата." ../footage/клип.mp4 ../output/test.mp4 pechat_posimvolno dark тень обычный
+python compose.py "Цитата." ../footage/клип.mp4 ../output/test.mp4 pechat_posimvolno dark тень Ксюша
 python voice.py "Текст, с паузами." ../output/voice.wav     озвучка и тайминги
 python footage.py sailboat sea                              клип по запросу
 python autopost.py --dry-run --slot=9                       что ушло бы в слот, без отправки

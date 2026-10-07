@@ -9,6 +9,10 @@
 только среди одобренных вариантов; голос звучит в двух слотах из четырёх,
 и какие это слоты, меняется по дням, чтобы голос не срастался со временем.
 
+Сначала ролик уходит на YouTube, потом в Instagram: площадки независимы,
+и сбой одной не отменяет другую. Instagram иногда не справляется с обработкой
+видео, поэтому ему даётся вторая попытка.
+
 Под роликом на YouTube первым комментарием от канала выходит вопрос
 с выбором из двух вариантов; в Instagram — тоже, если у токена есть право
 на комментарии, иначе это только отмечается в логе.
@@ -59,6 +63,7 @@ NET_DELAY = 20
 # Ролик должен выйти до HH:45: сборка до паузы и публикация после неё занимают ещё несколько минут
 JITTER_MIN = 0
 JITTER_MAX = 40 * 60
+IG_RETRY_DELAY = 120
 
 RUBRIC_TAGS = {"цитата": "#цитаты", "мотивация": "#мотивация", "совет": "#советы"}
 CAPTION_TAGS = ["#мотивация", "#мысли", "#саморазвитие"]
@@ -73,7 +78,7 @@ LOW_STOCK_DAYS = 14
 # Только варианты, одобренные на утверждении образцов 10.09.2026
 EFFECTS = typefx.ORDER
 GRADES = ("dark", "blur", "bw", "warm", "zoom")
-VOICES = ("обычный", "медленный", "бодрый", "с акцентом", "низкий")
+VOICES = ("Ксюша", "Евгений")
 
 # Расписание задано по Москве, а сервер живёт по UTC. Брать datetime.now()
 # нельзя: в 06:00 МСК скрипт увидел бы 03:00 и решил, что слот не наступил.
@@ -210,14 +215,16 @@ def engine_variant(journal, now, slot):
     """Эффект, фон, подача текста и голос для ролика, собираемого движком.
 
     Эффектов девять, фонов пять — числа взаимно простые, поэтому по кругу
-    за 45 роликов выпадают все их сочетания.
+    за 45 роликов выпадают все их сочетания. Каждый четвёртый ролик идёт
+    проверочным вариантом: фраза видна целиком с первого кадра.
     """
     built = [p for p in reels(journal) if p.get("source") == "engine"]
     n = len(built)
     voice = "нет"
     if voiced_slot(now, slot):
         voice = VOICES[sum(1 for p in built if p.get("voice") not in (None, "нет")) % len(VOICES)]
-    return {"effect": EFFECTS[n % len(EFFECTS)], "grade": GRADES[n % len(GRADES)],
+    effect = typefx.TEST if n % 4 == 3 else EFFECTS[n % len(EFFECTS)]
+    return {"effect": effect, "grade": GRADES[n % len(GRADES)],
             "text_style": "крупно" if n % 3 == 2 else "тень", "voice": voice}
 
 
@@ -289,6 +296,49 @@ def sleep_jitter():
 
 def error_text(e):
     return e.read().decode("utf-8", "replace")[:400] if hasattr(e, "read") else str(e)
+
+
+def publish_youtube(post):
+    """Ролик и первый комментарий на YouTube; None — площадка не приняла ролик."""
+    if not youtube_publish.configured():
+        return None, None
+    title, description, keywords = youtube_meta(post["text"], post["topic"], post["rubric"])
+    try:
+        video_id, privacy = youtube_publish.publish(post["path"], title, description, tags=keywords)
+    except (urllib.error.HTTPError, urllib.error.URLError, RuntimeError, ValueError, KeyError) as e:
+        log("YouTube: сбой — %s" % error_text(e))
+        return None, None
+    log("YouTube: опубликовано, id %s, доступ %s" % (video_id, privacy))
+    try:
+        comment = youtube_publish.comment(video_id, post["question"])
+        log("YouTube: первый комментарий %s" % comment)
+        return video_id, comment
+    except (urllib.error.HTTPError, urllib.error.URLError, RuntimeError, ValueError, KeyError) as e:
+        log("YouTube не принял комментарий: %s" % error_text(e))
+        return video_id, None
+
+
+def publish_instagram(media_url, post):
+    """Ролик и первый комментарий в Instagram; обработка видео иногда срывается, поэтому вторая попытка."""
+    media_id = None
+    for attempt in (1, 2):
+        try:
+            media_id = publish_reel(media_url, caption_for(post["text"], post["rubric"]))
+            break
+        except (urllib.error.HTTPError, RuntimeError, KeyError) as e:
+            log("Instagram: сбой публикации, попытка %d — %s" % (attempt, error_text(e)))
+            if attempt == 1:
+                time.sleep(IG_RETRY_DELAY)
+    if not media_id:
+        return None, None
+    log("Instagram: опубликовано, media_id %s" % media_id)
+    try:
+        comment = instagram_comment(media_id, post["question"])
+        log("Instagram: первый комментарий %s" % comment)
+        return media_id, comment
+    except (urllib.error.HTTPError, RuntimeError, KeyError, ValueError) as e:
+        log("Instagram не принял комментарий: %s" % error_text(e))
+        return media_id, None
 
 
 def prepare(journal, now, slot, day, force, engine_only):
@@ -383,34 +433,18 @@ def main():
         media_url = github_upload.upload(post["path"], "motivation/%s" % name)
         log("Загружено: %s" % media_url)
 
-        try:
-            media_id = publish_reel(media_url, caption_for(post["text"], post["rubric"]))
-        except (urllib.error.HTTPError, RuntimeError, KeyError) as e:
-            log("ОШИБКА публикации в Instagram: %s" % error_text(e))
+        youtube_id, yt_comment = publish_youtube(post)
+        media_id, ig_comment = publish_instagram(media_url, post)
+
+        if not youtube_id and not media_id:
+            log("Ролик не приняла ни одна площадка — слот пропущен")
             if post["source"] == "engine":
                 drop_local(post["path"])
             return 1
-        log("Instagram: опубликовано, media_id %s" % media_id)
-
-        ig_comment = None
-        try:
-            ig_comment = instagram_comment(media_id, post["question"])
-            log("Instagram: первый комментарий %s" % ig_comment)
-        except (urllib.error.HTTPError, RuntimeError, KeyError, ValueError) as e:
-            log("Instagram не принял комментарий: %s" % error_text(e))
-
-        youtube_id, yt_comment = None, None
-        if youtube_publish.configured():
-            title, description, keywords = youtube_meta(post["text"], post["topic"], post["rubric"])
-            try:
-                youtube_id, privacy = youtube_publish.publish(
-                    post["path"], title, description, tags=keywords)
-                log("YouTube: опубликовано, id %s, доступ %s" % (youtube_id, privacy))
-                yt_comment = youtube_publish.comment(youtube_id, post["question"])
-                log("YouTube: первый комментарий %s" % yt_comment)
-            except (urllib.error.HTTPError, urllib.error.URLError, RuntimeError,
-                    ValueError, KeyError) as e:
-                log("YouTube: сбой — %s" % error_text(e))
+        if not media_id:
+            log("Ролик вышел только на YouTube")
+        elif not youtube_id:
+            log("Ролик вышел только в Instagram")
 
         journal.setdefault("posts", {})["%s_%02d" % (day, slot)] = {
             "kind": "reel", "source": post["source"], "sample": post.get("sample"),

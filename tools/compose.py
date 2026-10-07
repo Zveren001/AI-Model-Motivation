@@ -46,12 +46,10 @@ GRADE_NAMES = {"dark": "затемнение", "blur": "размытие", "bw":
 
 VOICES = {
     "нет": None,
-    "обычный": {"rate": "+0%", "pitch": "+0Hz", "pause_scale": 1.0, "final_pause": 0.0},
-    "медленный": {"rate": "-10%", "pitch": "+0Hz", "pause_scale": 1.5, "final_pause": 0.0},
-    "бодрый": {"rate": "+6%", "pitch": "+0Hz", "pause_scale": 0.8, "final_pause": 0.0},
-    "с акцентом": {"rate": "-4%", "pitch": "+0Hz", "pause_scale": 1.15, "final_pause": 0.45},
-    "низкий": {"rate": "-6%", "pitch": "-8Hz", "pause_scale": 1.2, "final_pause": 0.2},
+    "Ксюша": {"speaker": "xenia", "rate": "slow", "pause_scale": 1.0, "final_pause": 0.0},
+    "Евгений": {"speaker": "eugene", "rate": "slow", "pause_scale": 1.0, "final_pause": 0.0},
 }
+DEFAULT_VOICE = "Ксюша"
 
 TEXT_STYLES = {
     "тень": {"sizes": range(104, 47, -2), "center": 0.5},
@@ -137,7 +135,7 @@ def motion_chain(rnd, zoom, colour_shift):
 
 
 def render(text, out_path, clip, effect, grade="dark", text_style="тень",
-           voice_preset="обычный", seed=0, log=print):
+           voice_preset=DEFAULT_VOICE, seed=0, log=print):
     """Собирает готовый ролик и возвращает его длительность в секундах."""
     rnd = random.Random(seed)
     style = TEXT_STYLES[text_style]
@@ -147,7 +145,7 @@ def render(text, out_path, clip, effect, grade="dark", text_style="тень",
     work = tempfile.mkdtemp(prefix="clip_")
     try:
         voice_path = os.path.join(work, "voice.wav")
-        words = voice.speak_phrases(text, voice_path, **(preset or VOICES["обычный"]))
+        words = voice.synthesize(text, voice_path, preset or VOICES[DEFAULT_VOICE], log=log)
         starts, ends = align(tokens, words)
         timeline = typefx.Timeline([s + LEAD for s in starts], [e + LEAD for e in ends])
         layout = typefx.Layout(tokens, style["sizes"], style["center"])
@@ -225,7 +223,7 @@ def main():
     args = sys.argv[1:] + [None] * 7
     text, clip, out = args[0], args[1], args[2]
     duration = render(text, out, clip, args[3] or "pechat_posimvolno", args[4] or "dark",
-                      args[5] or "тень", args[6] or "обычный")
+                      args[5] or "тень", args[6] or DEFAULT_VOICE)
     print("Готово: %s, %.1f с" % (out, duration))
     return 0
 
