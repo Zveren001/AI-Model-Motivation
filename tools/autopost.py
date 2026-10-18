@@ -11,7 +11,8 @@
 
 Сначала ролик уходит на YouTube, потом в Instagram: площадки независимы,
 и сбой одной не отменяет другую. Instagram иногда не справляется с обработкой
-видео, поэтому ему даётся вторая попытка.
+видео, поэтому ему даётся вторая попытка. Ключ INSTAGRAM=off выключает вторую
+площадку целиком — тогда ролик никуда не загружается, кроме YouTube.
 
 Под роликом на YouTube первым комментарием от канала выходит вопрос
 с выбором из двух вариантов; в Instagram — тоже, если у токена есть право
@@ -64,6 +65,9 @@ NET_DELAY = 20
 JITTER_MIN = 0
 JITTER_MAX = 40 * 60
 IG_RETRY_DELAY = 120
+
+# Instagram выключен 18.10.2026: охват упал до единиц просмотров на ролик
+INSTAGRAM = config.get("INSTAGRAM", "on").strip().lower() not in ("off", "0", "no")
 
 RUBRIC_TAGS = {"цитата": "#цитаты", "мотивация": "#мотивация", "совет": "#советы"}
 CAPTION_TAGS = ["#мотивация", "#мысли", "#саморазвитие"]
@@ -215,16 +219,18 @@ def engine_variant(journal, now, slot):
     """Эффект, фон, подача текста и голос для ролика, собираемого движком.
 
     Эффектов девять, фонов пять — числа взаимно простые, поэтому по кругу
-    за 45 роликов выпадают все их сочетания. Каждый четвёртый ролик идёт
-    проверочным вариантом: фраза видна целиком с первого кадра.
+    за 45 роликов выпадают все их сочетания. Каждый пятый ролик идёт
+    проверочным вариантом «фраза целиком»: слотов четыре, и при шаге в пять
+    он гуляет по всем слотам, а не прилипает к одному. Фон сдвигается ещё
+    и на номер пятёрки — иначе проверочному варианту всегда доставался zoom.
     """
     built = [p for p in reels(journal) if p.get("source") == "engine"]
     n = len(built)
     voice = "нет"
     if voiced_slot(now, slot):
         voice = VOICES[sum(1 for p in built if p.get("voice") not in (None, "нет")) % len(VOICES)]
-    effect = typefx.TEST if n % 4 == 3 else EFFECTS[n % len(EFFECTS)]
-    return {"effect": effect, "grade": GRADES[n % len(GRADES)],
+    effect = typefx.TEST if n % 5 == 4 else EFFECTS[n % len(EFFECTS)]
+    return {"effect": effect, "grade": GRADES[(n + n // 5) % len(GRADES)],
             "text_style": "крупно" if n % 3 == 2 else "тень", "voice": voice}
 
 
@@ -423,25 +429,30 @@ def main():
         if "--now" not in sys.argv:
             sleep_jitter()
 
-        if not wait_for_network():
+        if INSTAGRAM and not wait_for_network():
             log("Сеть недоступна, публикация отложена")
             if post["source"] == "engine":
                 drop_local(post["path"])
             return 1
 
-        name = "%s_%02d.mp4" % (day, slot)
-        media_url = github_upload.upload(post["path"], "motivation/%s" % name)
-        log("Загружено: %s" % media_url)
+        media_id, ig_comment = None, None
+        if INSTAGRAM:
+            name = "%s_%02d.mp4" % (day, slot)
+            media_url = github_upload.upload(post["path"], "motivation/%s" % name)
+            log("Загружено: %s" % media_url)
+        else:
+            log("Instagram отключён, ролик идёт только на YouTube")
 
         youtube_id, yt_comment = publish_youtube(post)
-        media_id, ig_comment = publish_instagram(media_url, post)
+        if INSTAGRAM:
+            media_id, ig_comment = publish_instagram(media_url, post)
 
         if not youtube_id and not media_id:
             log("Ролик не приняла ни одна площадка — слот пропущен")
             if post["source"] == "engine":
                 drop_local(post["path"])
             return 1
-        if not media_id:
+        if INSTAGRAM and not media_id:
             log("Ролик вышел только на YouTube")
         elif not youtube_id:
             log("Ролик вышел только в Instagram")
