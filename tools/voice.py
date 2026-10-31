@@ -1,35 +1,40 @@
 # -*- coding: utf-8 -*-
-"""Озвучка текста с таймингами слов: Silero на сервере или edge-tts как запасной.
+"""Голос ролика через Gemini TTS и время каждого слова для анимации текста.
 
-Движок выбирается ключом VOICE_ENGINE в .env, подача голоса приходит из
-compose.VOICES. Silero живёт в отдельном окружении — см. tts_silero.
-
-Оба движка озвучивают текст по фразам: Microsoft запрещает в edge-tts
-собственную SSML-разметку, поэтому тег паузы не работает, а сплошной синтез
-проглатывает запятые и тире. Текст режется на фразы по знакам препинания,
-каждая озвучивается отдельно и склеивается с тишиной нужной длины — так паузу
-задаём мы, а не сервис.
+Сервис не отдаёт таймингов слов, а whisper серверу не по силам: на нём одно ядро
+и рядом работает VPN. Поэтому границы фраз берутся из пауз в самой речи,
+а внутри фразы слова раскладываются по слогам.
 """
 
-import asyncio
+import json
 import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import wave
-
-import edge_tts
 
 import config
 
-ENGINE = config.get("VOICE_ENGINE", "edge")
-VOICE = config.get("VOICE", "ru-RU-SvetlanaNeural")
-RATE = config.get("VOICE_RATE", "+0%")
-PITCH = config.get("VOICE_PITCH", "+0Hz")
+URL = "https://openrouter.ai/api/v1/audio/speech"
+MODEL = "google/gemini-3.8-flash-tts"
+STYLE = ("Говори по-русски спокойно, уверенно и неторопливо, как человек, который говорит важную мысль близкому: "
+         "тепло, без дикторской подачи и без пафоса. Делай естественные паузы на запятых, тире и точках")
 ATTEMPTS = 3
 RETRY_DELAY = 20
+TIMEOUT = 120
 SAMPLE_RATE = 24000
-TAIL_KEEP = 0.06
+SILENCE_FILTER = "silencedetect=noise=-35dB:d=0.12"
+EDGE_TOLERANCE = 0.02
+
+SECONDS_PER_SYLLABLE = 0.25
+MIN_LENGTH_RATIO = 0.4
+MAX_LENGTH_RATIO = 2.5
+VOWELS = "аеёиоуыэюя"
+
+# Стык слов съедает заметную долю времени короткого слова, иначе односложные слова спешат
+WORD_GAP = 0.35
 
 PAUSES = {",": 0.28, ";": 0.35, ":": 0.40, "—": 0.42, "–": 0.42,
           ".": 0.60, "!": 0.60, "?": 0.60, "…": 0.70}
@@ -52,118 +57,127 @@ def phrases(text):
     return out
 
 
-def tts_text(phrase):
-    """Тире в конце фразы сервис не озвучивает интонацией, запятая — да."""
-    return re.sub(r"\s*[—–]$", ",", phrase)
+def spoken_words(text):
+    return [w for w in text.split() if re.search(r"\w", w)]
 
 
-async def _speak(text, rate, pitch):
-    communicate = edge_tts.Communicate(text, VOICE, rate=rate, pitch=pitch,
-                                       boundary="WordBoundary")
-    words, audio = [], bytearray()
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio.extend(chunk["data"])
-        elif chunk["type"] == "WordBoundary":
-            start = chunk["offset"] / 1e7
-            words.append((start, start + chunk["duration"] / 1e7, chunk["text"]))
-    if not audio or not words:
-        raise RuntimeError("сервис вернул пустой ответ")
-    return bytes(audio), words
+def syllables(word):
+    return max(1, sum(1 for ch in word.lower() if ch in VOWELS))
 
 
-def _speak_retry(text, rate, pitch):
-    last = None
-    for attempt in range(1, ATTEMPTS + 1):
-        try:
-            return asyncio.run(_speak(text, rate, pitch))
-        except Exception as e:  # noqa: BLE001
-            last = e
-            if attempt < ATTEMPTS:
-                time.sleep(RETRY_DELAY * attempt)
-    raise RuntimeError("озвучка не удалась после %d попыток: %s" % (ATTEMPTS, last))
+def word_times(text, start, duration):
+    """Слова фразы на отрезке от start длиной duration, пропорционально слогам."""
+    words = spoken_words(text)
+    weights = [syllables(w) + WORD_GAP for w in words]
+    total = sum(weights) or 1.0
+    out, cursor = [], start
+    for word, weight in zip(words, weights):
+        span = duration * weight / total
+        out.append((cursor, cursor + span, word))
+        cursor += span
+    return out
 
 
-def _pcm(mp3):
-    result = subprocess.run(
-        [ffmpeg_bin(), "-loglevel", "error", "-i", "pipe:0", "-f", "s16le",
-         "-ac", "1", "-ar", str(SAMPLE_RATE), "pipe:1"],
-        input=mp3, stdout=subprocess.PIPE, check=True)
-    return result.stdout
-
-
-def speak_phrases(text, out_path, rate=None, pitch=None, pause_scale=1.0, final_pause=0.0):
-    """Пишет WAV с паузами между фразами и возвращает [(начало, конец, слово)].
-
-    final_pause добавляет тишину перед последней фразой — пауза перед
-    главным словом держит внимание сильнее самого текста.
-    """
-    rate, pitch = rate or RATE, pitch or PITCH
-    chunks, words, cursor = [], [], 0.0
+def estimated_words(text):
+    """Время слов ролика без голоса: по слогам и обычным паузам, без запроса к сервису."""
+    words, cursor = [], 0.0
     parts = phrases(text)
     for index, phrase in enumerate(parts):
-        mp3, spoken = _speak_retry(tts_text(phrase), rate, pitch)
-        pcm = _pcm(mp3)
-        keep = int((spoken[-1][1] + TAIL_KEEP) * SAMPLE_RATE) * 2
-        pcm = pcm[:keep]
-        chunks.append(pcm)
-        words += [(cursor + s, cursor + e, w) for s, e, w in spoken]
-        cursor += len(pcm) / 2.0 / SAMPLE_RATE
+        length = sum(syllables(w) for w in spoken_words(phrase)) * SECONDS_PER_SYLLABLE
+        words += word_times(phrase, cursor, length)
+        cursor += length
         if index + 1 < len(parts):
-            pause = PAUSES.get(phrase.rstrip()[-1:], 0.25) * pause_scale
-            if index + 2 == len(parts):
-                pause += final_pause
-            chunks.append(b"\x00\x00" * int(pause * SAMPLE_RATE))
-            cursor += pause
+            cursor += PAUSES.get(phrase.rstrip()[-1:], 0.25)
+    return words
 
-    with wave.open(out_path, "wb") as f:
+
+def request_speech(text, speaker):
+    key = config.get("OPENROUTER_API_KEY")
+    if not key:
+        raise RuntimeError("не задан OPENROUTER_API_KEY")
+    body = json.dumps({"model": MODEL, "voice": speaker, "input": text,
+                       "response_format": "pcm", "instructions": STYLE}).encode("utf-8")
+    req = urllib.request.Request(URL, data=body, headers={
+        "Authorization": "Bearer " + key, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        if not resp.headers.get("Content-Type", "").startswith("audio"):
+            raise RuntimeError("сервис вернул не звук: %s" % resp.read(200).decode("utf-8", "replace"))
+        return resp.read()
+
+
+def check_length(pcm, text):
+    """Звук сильно короче или длиннее текста — модель оборвала фразу или прочитала лишнее."""
+    expected = estimated_words(text)[-1][1]
+    seconds = len(pcm) / 2.0 / SAMPLE_RATE
+    if not MIN_LENGTH_RATIO * expected <= seconds <= MAX_LENGTH_RATIO * expected:
+        raise RuntimeError("длина звука %.1f с при ожидаемых %.1f с" % (seconds, expected))
+
+
+def silences(pcm):
+    done = subprocess.run(
+        [ffmpeg_bin(), "-hide_banner", "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "1", "-i", "pipe:0",
+         "-af", SILENCE_FILTER, "-f", "null", "-"], input=pcm, capture_output=True, check=True)
+    log = done.stderr.decode("utf-8", "replace")
+    starts = [float(x) for x in re.findall(r"silence_start: ([\d.]+)", log)]
+    ends = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", log)]
+    return list(zip(starts, ends))
+
+
+def speech_words(pcm, text):
+    """Границы фраз — самые длинные паузы речи; мелкие паузы бывают и внутри фразы."""
+    parts = phrases(text)
+    total = len(pcm) / 2.0 / SAMPLE_RATE
+    gaps = silences(pcm)
+    start = gaps[0][1] if gaps and gaps[0][0] <= EDGE_TOLERANCE else 0.0
+    end = gaps[-1][0] if gaps and gaps[-1][1] >= total - EDGE_TOLERANCE else total
+    inner = [g for g in gaps if g[0] > start and g[1] < end]
+    needed = len(parts) - 1
+    if len(inner) < needed:
+        return word_times(text, start, end - start)
+    longest = sorted(inner, key=lambda g: g[1] - g[0], reverse=True)[:needed]
+    boundaries = sorted(longest)
+    words, cursor = [], start
+    for phrase, gap in zip(parts, boundaries + [(end, end)]):
+        words += word_times(phrase, cursor, gap[0] - cursor)
+        cursor = gap[1]
+    return words
+
+
+def write_wav(path, pcm):
+    with wave.open(path, "wb") as f:
         f.setnchannels(1)
         f.setsampwidth(2)
         f.setframerate(SAMPLE_RATE)
-        f.writeframes(b"".join(chunks))
-    return words
+        f.writeframes(pcm)
 
 
-def synthesize(text, out_path, preset, log=print):
-    """Озвучка по описанию подачи; если Silero недоступен, ролик озвучивает edge-tts."""
-    if ENGINE == "silero" and preset.get("speaker"):
-        import tts_silero  # локальный импорт: модуль нужен только при включённом Silero
-        try:
-            return tts_silero.speak_phrases(text, out_path, preset["speaker"],
-                                            preset.get("rate", "medium"),
-                                            preset.get("pause_scale", 1.0),
-                                            preset.get("final_pause", 0.0))
-        except Exception as e:  # noqa: BLE001
-            log("Silero не отработал (%s), озвучиваю прежним голосом" % e)
-    return speak_phrases(text, out_path, preset.get("edge_rate"), preset.get("edge_pitch"),
-                         preset.get("pause_scale", 1.0), preset.get("final_pause", 0.0))
+def error_text(e):
+    return e.read().decode("utf-8", "replace")[:200] if isinstance(e, urllib.error.HTTPError) else str(e)
 
 
-async def _speak_whole(text, out_path):
-    audio, words = await _speak(text, RATE, PITCH)
-    with open(out_path, "wb") as f:
-        f.write(audio)
-    return words
-
-
-def speak(text, out_path):
-    """Сплошная озвучка одним куском — для старого формата роликов."""
-    last = None
+def synthesize(text, out_path, speaker, log=print):
+    """Пишет WAV и возвращает [(начало, конец, слово)]; None — голоса нет, ролик выйдет тихим."""
     for attempt in range(1, ATTEMPTS + 1):
         try:
-            return asyncio.run(_speak_whole(text, out_path))
+            pcm = request_speech(text, speaker)
+            check_length(pcm, text)
+            words = speech_words(pcm, text)
+            write_wav(out_path, pcm)
+            return words
         except Exception as e:  # noqa: BLE001
-            last = e
-            if attempt < ATTEMPTS:
+            log("Голос %s, попытка %d из %d: %s" % (speaker, attempt, ATTEMPTS, error_text(e)))
+            if attempt < ATTEMPTS and config.get("OPENROUTER_API_KEY"):
                 time.sleep(RETRY_DELAY * attempt)
-    raise RuntimeError("озвучка не удалась после %d попыток: %s" % (ATTEMPTS, last))
+    return None
 
 
 def main():
-    if len(sys.argv) < 3:
-        print("Использование: python voice.py \"текст\" файл.wav")
+    if len(sys.argv) < 4:
+        print("Использование: python voice.py \"текст\" файл.wav Leda")
         return 1
-    words = speak_phrases(sys.argv[1], sys.argv[2])
+    words = synthesize(sys.argv[1], sys.argv[2], sys.argv[3])
+    if not words:
+        return 1
     print("фразы:", " | ".join(phrases(sys.argv[1])))
     for start, end, word in words:
         print("%6.2f  %6.2f  %s" % (start, end, word))

@@ -44,12 +44,9 @@ LOUDNESS = "loudnorm=I=-14:TP=-1.5:LRA=11"
 GRADE_NAMES = {"dark": "затемнение", "blur": "размытие", "bw": "чёрно-белый",
                "warm": "тёплый", "zoom": "наезд камеры"}
 
-VOICES = {
-    "нет": None,
-    "Ксюша": {"speaker": "xenia", "rate": "slow", "pause_scale": 1.0, "final_pause": 0.0},
-    "Евгений": {"speaker": "eugene", "rate": "slow", "pause_scale": 1.0, "final_pause": 0.0},
-}
-DEFAULT_VOICE = "Ксюша"
+VOICES = ("нет", "Leda", "Enceladus")
+SILENT = VOICES[0]
+DEFAULT_VOICE = "Leda"
 
 TEXT_STYLES = {
     "тень": {"sizes": range(104, 47, -2), "center": 0.5},
@@ -136,16 +133,20 @@ def motion_chain(rnd, zoom, colour_shift):
 
 def render(text, out_path, clip, effect, grade="dark", text_style="тень",
            voice_preset=DEFAULT_VOICE, seed=0, log=print):
-    """Собирает готовый ролик и возвращает его длительность в секундах."""
+    """Собирает ролик и возвращает его длительность и голос, который реально прозвучал."""
     rnd = random.Random(seed)
     style = TEXT_STYLES[text_style]
-    preset = VOICES[voice_preset]
+    if voice_preset not in VOICES:
+        raise ValueError("нет такого голоса: %s" % voice_preset)
     tokens = tokens_of(text)
 
     work = tempfile.mkdtemp(prefix="clip_")
     try:
         voice_path = os.path.join(work, "voice.wav")
-        words = voice.synthesize(text, voice_path, preset or VOICES[DEFAULT_VOICE], log=log)
+        words = None if voice_preset == SILENT else voice.synthesize(text, voice_path, voice_preset, log=log)
+        voiced = bool(words)
+        if not voiced:
+            words = voice.estimated_words(text)
         starts, ends = align(tokens, words)
         timeline = typefx.Timeline([s + LEAD for s in starts], [e + LEAD for e in ends])
         layout = typefx.Layout(tokens, style["sizes"], style["center"])
@@ -166,10 +167,10 @@ def render(text, out_path, clip, effect, grade="dark", text_style="тень",
         music = os.path.join(AUDIO_DIR, MUSIC[rnd.randrange(len(MUSIC))])
         inputs += ["-stream_loop", "-1", "-i", music]
         audio.append("[%d:a]atrim=0:%.2f,volume=%.2f,afade=t=in:d=0.4,afade=t=out:st=%.2f:d=0.7[m]"
-                     % (n, duration, 0.18 if preset else 1.0, duration - 0.7))
+                     % (n, duration, 0.18 if voiced else 1.0, duration - 0.7))
         mix.append("[m]")
         n += 1
-        if preset:
+        if voiced:
             inputs += ["-i", voice_path]
             ms = int(LEAD * 1000)
             audio.append("[%d:a]adelay=%d|%d,apad[vo]" % (n, ms, ms))
@@ -180,7 +181,7 @@ def render(text, out_path, clip, effect, grade="dark", text_style="тень",
             ms = int(timeline.starts[0] * 1000)
             inputs += ["-stream_loop", "-1", "-i", CLICKS]
             audio.append("[%d:a]atrim=0:%.2f,volume=%.2f,afade=t=out:st=%.2f:d=0.4,"
-                         "adelay=%d|%d[k]" % (n, typing, 0.35 if preset else 0.55,
+                         "adelay=%d|%d[k]" % (n, typing, 0.35 if voiced else 0.55,
                                               max(0.0, typing - 0.4), ms, ms))
             mix.append("[k]")
             n += 1
@@ -211,7 +212,7 @@ def render(text, out_path, clip, effect, grade="dark", text_style="тень",
         if code != 0:
             with open(errors_path, encoding="utf-8", errors="replace") as f:
                 raise RuntimeError("ffmpeg: %s" % f.read()[-800:])
-        return duration
+        return duration, voice_preset if voiced else SILENT
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -222,9 +223,9 @@ def main():
         return 1
     args = sys.argv[1:] + [None] * 7
     text, clip, out = args[0], args[1], args[2]
-    duration = render(text, out, clip, args[3] or "pechat_posimvolno", args[4] or "dark",
-                      args[5] or "тень", args[6] or DEFAULT_VOICE)
-    print("Готово: %s, %.1f с" % (out, duration))
+    duration, spoken = render(text, out, clip, args[3] or "pechat_posimvolno", args[4] or "dark",
+                              args[5] or "тень", args[6] or DEFAULT_VOICE)
+    print("Готово: %s, %.1f с, голос %s" % (out, duration, spoken))
     return 0
 
 

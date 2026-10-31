@@ -280,7 +280,7 @@ def build(numbers, rerolls):
         old = manifest.get(str(number), {}).get("file")
         if old and old != name and os.path.exists(os.path.join(OUT, old)):
             os.remove(os.path.join(OUT, old))
-        duration = compose.render(text, os.path.join(OUT, name), clip, effect, grade,
+        duration, _ = compose.render(text, os.path.join(OUT, name), clip, effect, grade,
                                   text_style, voice, seed=number)
         manifest[str(number)] = {
             "file": name, "text": text, "topic": topic, "query": query,

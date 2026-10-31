@@ -82,7 +82,7 @@ LOW_STOCK_DAYS = 14
 # Только варианты, одобренные на утверждении образцов 10.09.2026
 EFFECTS = typefx.ORDER
 GRADES = ("dark", "blur", "bw", "warm", "zoom")
-VOICES = ("Ксюша", "Евгений")
+VOICES = ("Leda", "Enceladus")
 
 # Расписание задано по Москве, а сервер живёт по UTC. Брать datetime.now()
 # нельзя: в 06:00 МСК скрипт увидел бы 03:00 и решил, что слот не наступил.
@@ -375,8 +375,11 @@ def prepare(journal, now, slot, day, force, engine_only):
         log("Нет видеоряда: сток недоступен и кэш пуст — слот пропущен")
         return None
     path = os.path.join(config.OUTPUT, "%s_%02d.mp4" % (day, slot))
-    duration = compose.render(quote["text"], path, clip, variant["effect"], variant["grade"],
-                              variant["text_style"], variant["voice"], seed=quote["id"])
+    duration, spoken = compose.render(quote["text"], path, clip, variant["effect"], variant["grade"],
+                                      variant["text_style"], variant["voice"], seed=quote["id"], log=log)
+    if spoken != variant["voice"]:
+        log("ВНИМАНИЕ: голос %s не получен, ролик выйдет без голоса" % variant["voice"])
+        variant["voice"] = spoken
     log("Ролик собран: %.1f с" % duration)
     return dict(variant, **phrase, path=path, source="engine", sample=None,
                 clip=os.path.basename(clip)[:-4], duration=duration)
