@@ -1,0 +1,8 @@
+/opt/motivation/cron.log /opt/motivation/autopost.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

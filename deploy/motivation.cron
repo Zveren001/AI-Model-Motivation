@@ -45,3 +45,4 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 0 16 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
 0 21 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
 30 5 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python youtube_stats.py >> /opt/motivation/cron.log 2>&1
+30 4 * * * root nice -n 15 ionice -c3 bash /opt/motivation/deploy/backup.sh >> /opt/motivation/cron.log 2>&1
