@@ -5,15 +5,10 @@
 # молча игнорируется, и задача уходит на три часа позже задуманного.
 #
 # 06:00 UTC = 09:00 МСК  утро
-# 10:00 UTC = 13:00 МСК  день
 # 16:00 UTC = 19:00 МСК  вечер
-# 21:00 UTC = 00:00 МСК  ночь, следующего календарного дня
 # 05:30 UTC = 08:30 МСК  сбор статистики YouTube, до первого слота
 #
 # В каждый слот уходит один ролик — на YouTube и в Instagram одновременно.
-#
-# Полуночный слот стоит в UTC на день раньше: скрипт считает московское
-# время сам и запишет пост в журнал уже следующей датой.
 #
 # Пересчёт безопасен навсегда: Москва с 2014 года стоит на UTC+3 и на летнее
 # время не переходит.
@@ -41,8 +36,6 @@ SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 0 6  * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
-0 10 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
 0 16 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
-0 21 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python autopost.py >> /opt/motivation/cron.log 2>&1
 30 5 * * * root cd /opt/motivation/tools && nice -n 15 ionice -c3 ../venv/bin/python youtube_stats.py >> /opt/motivation/cron.log 2>&1
 30 4 * * * root nice -n 15 ionice -c3 bash /opt/motivation/deploy/backup.sh >> /opt/motivation/cron.log 2>&1

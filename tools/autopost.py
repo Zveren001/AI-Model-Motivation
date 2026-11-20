@@ -83,6 +83,7 @@ LOW_STOCK_DAYS = 14
 EFFECTS = typefx.ORDER
 GRADES = ("dark", "blur", "bw", "warm", "zoom")
 VOICES = ("Leda", "Enceladus")
+HOOK_PLACE = "заставка"
 
 # Расписание задано по Москве, а сервер живёт по UTC. Брать datetime.now()
 # нельзя: в 06:00 МСК скрипт увидел бы 03:00 и решил, что слот не наступил.
@@ -167,7 +168,7 @@ def hours(name, default):
 
 
 def slots():
-    return hours("SLOTS", "9,13,19,0")
+    return hours("SLOTS", "9,19")
 
 
 def current_slot(now):
@@ -213,6 +214,13 @@ def voiced_slot(now, slot):
     order = slots()
     index = order.index(slot) if slot in order else 0
     return (now.date().toordinal() + index) % 2 == 0
+
+
+def hooked_slot(now, slot):
+    """Зацеп в одном слоте из двух, слот меняется раз в два дня, поэтому зацеп поровну достаётся роликам с голосом и без"""
+    order = slots()
+    index = order.index(slot) if slot in order else 0
+    return (now.date().toordinal() // 2 + index) % 2 == 0
 
 
 def engine_variant(journal, now, slot):
@@ -367,16 +375,21 @@ def prepare(journal, now, slot, day, force, engine_only):
 
     variant = engine_variant(journal, now, slot)
     variant.update({k: v for k, v in force.items() if v})
-    log("Сборка по фразе #%d, рубрика «%s», «%s»: эффект %s, фон %s, текст %s, голос %s"
+    hooked = hooked_slot(now, slot)
+    variant["hook"] = quote.get("hook") if hooked else None
+    log("Сборка по фразе #%d, рубрика «%s», «%s»: эффект %s, фон %s, текст %s, голос %s, зацеп %s"
         % (quote["id"], quote["rubric"], quote["text"], variant["effect"], variant["grade"],
-           variant["text_style"], variant["voice"]))
+           variant["text_style"], variant["voice"], "«%s»" % variant["hook"] if variant["hook"] else "нет"))
+    if hooked and not variant["hook"]:
+        log("ВНИМАНИЕ: у фразы нет зацепа, ролик выйдет без него")
     clip = footage.pick_for_query(quote["query"], log=log)
     if not clip:
         log("Нет видеоряда: сток недоступен и кэш пуст — слот пропущен")
         return None
     path = os.path.join(config.OUTPUT, "%s_%02d.mp4" % (day, slot))
     duration, spoken = compose.render(quote["text"], path, clip, variant["effect"], variant["grade"],
-                                      variant["text_style"], variant["voice"], seed=quote["id"], log=log)
+                                      variant["text_style"], variant["voice"], seed=quote["id"], log=log,
+                                      hook=variant["hook"], hook_place=HOOK_PLACE)
     if spoken != variant["voice"]:
         log("ВНИМАНИЕ: голос %s не получен, ролик выйдет без голоса" % variant["voice"])
         variant["voice"] = spoken
@@ -465,7 +478,8 @@ def main():
             "quote_id": post.get("quote_id"), "rubric": post["rubric"],
             "text": post["text"], "topic": post["topic"],
             "question": post["question"], "effect": post["effect"], "grade": post["grade"],
-            "text_style": post["text_style"], "voice": post["voice"], "clip": post["clip"],
+            "text_style": post["text_style"], "voice": post["voice"], "hook": post.get("hook"),
+            "clip": post["clip"],
             "duration": post["duration"], "media_id": media_id, "ig_comment": ig_comment,
             "youtube_id": youtube_id, "yt_comment": yt_comment, "index": index,
             "slot": slot, "at": now.isoformat(timespec="seconds"),

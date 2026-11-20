@@ -43,6 +43,12 @@ NAMES = {
 TEST = "fraza_tselikom"
 DIM = 135
 
+HOOK_PLACES = {
+    "заставка": {"sizes": range(140, 71, -2), "center": 0.5, "lead": 1.4},
+    "заголовок": {"sizes": range(104, 63, -2), "center": 0.18, "lead": 0.0},
+}
+HOOK_FADE = 0.3
+
 _fonts = {}
 
 
@@ -371,8 +377,25 @@ EFFECTS = {
 ORDER = tuple(k for k in EFFECTS if k != TEST)
 
 
-def frame_at(effect, layout, timeline, t):
+class Hook(object):
+    """Зацеп с первого кадра, крупной заставкой до фразы или заголовком над ней"""
+
+    def __init__(self, tokens, place):
+        style = HOOK_PLACES[place]
+        self.layout = Layout(tokens, style["sizes"], style["center"])
+        self.lead = style["lead"]
+
+    def draw(self, frame, t):
+        alpha = 255 if not self.lead else int(255 * clamp((self.lead - t) / HOOK_FADE))
+        if alpha:
+            draw_lines(self.layout, ImageDraw.Draw(frame), self.layout.strings, GLOW, alpha)
+
+
+def frame_at(effect, layout, timeline, t, hook=None):
     """Кадр текстового слоя в момент t на прозрачном фоне."""
     frame = layer()
-    EFFECTS[effect](layout, timeline, t, frame)
+    if hook:
+        hook.draw(frame, t)
+    if not hook or t >= hook.lead:
+        EFFECTS[effect](layout, timeline, t, frame)
     return frame

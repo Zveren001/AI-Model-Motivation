@@ -132,13 +132,15 @@ def motion_chain(rnd, zoom, colour_shift):
 
 
 def render(text, out_path, clip, effect, grade="dark", text_style="тень",
-           voice_preset=DEFAULT_VOICE, seed=0, log=print):
+           voice_preset=DEFAULT_VOICE, seed=0, log=print, hook=None, hook_place="заголовок"):
     """Собирает ролик и возвращает его длительность и голос, который реально прозвучал."""
     rnd = random.Random(seed)
     style = TEXT_STYLES[text_style]
     if voice_preset not in VOICES:
         raise ValueError("нет такого голоса: %s" % voice_preset)
     tokens = tokens_of(text)
+    hook_layer = typefx.Hook(tokens_of(hook), hook_place) if hook else None
+    lead = LEAD + (hook_layer.lead if hook_layer else 0.0)
 
     work = tempfile.mkdtemp(prefix="clip_")
     try:
@@ -148,7 +150,7 @@ def render(text, out_path, clip, effect, grade="dark", text_style="тень",
         if not voiced:
             words = voice.estimated_words(text)
         starts, ends = align(tokens, words)
-        timeline = typefx.Timeline([s + LEAD for s in starts], [e + LEAD for e in ends])
+        timeline = typefx.Timeline([s + lead for s in starts], [e + lead for e in ends])
         layout = typefx.Layout(tokens, style["sizes"], style["center"])
         duration = round(max(MIN_DURATION, timeline.speech_end + HOLD), 2)
 
@@ -172,7 +174,7 @@ def render(text, out_path, clip, effect, grade="dark", text_style="тень",
         n += 1
         if voiced:
             inputs += ["-i", voice_path]
-            ms = int(LEAD * 1000)
+            ms = int(lead * 1000)
             audio.append("[%d:a]adelay=%d|%d,apad[vo]" % (n, ms, ms))
             mix.append("[vo]")
             n += 1
@@ -203,7 +205,7 @@ def render(text, out_path, clip, effect, grade="dark", text_style="тень",
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=errors)
             try:
                 for i in range(int(duration * FPS) + 1):
-                    frame = typefx.frame_at(effect, layout, timeline, i / float(FPS))
+                    frame = typefx.frame_at(effect, layout, timeline, i / float(FPS), hook_layer)
                     proc.stdin.write(frame.tobytes())
                 proc.stdin.close()
             except (BrokenPipeError, OSError):
